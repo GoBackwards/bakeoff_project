@@ -217,3 +217,7 @@ __marimo__/
 
 # go/no-go test recordings (tools/gonogo.py)
 gonogo_runs/
+
+# saved models (keep the starter example)
+*.model
+!src/svm_whistle_hiss.model

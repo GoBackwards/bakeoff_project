@@ -3,7 +3,10 @@ from pathlib import Path
 
 import json
 import pickle
+import re
 import numpy as np
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 from sklearn.svm import LinearSVC, SVC
 
 from stream_analyzer import StreamAnalyzer
@@ -12,6 +15,126 @@ MODEL_LINEAR_SVC = "LinearSVC"
 MODEL_POLY_SVC = "SVC poly degree 1"
 MODEL_OPTIONS = [MODEL_LINEAR_SVC, MODEL_POLY_SVC]
 DEFAULT_MODEL_TYPE = MODEL_LINEAR_SVC
+
+# Saved with each model so a model trained on different preprocessing is not used silently.
+PREPROCESS_VERSION = "log10-shape-v1"
+
+# A class whose name contains one of these words is the Neutral class (case-insensitive).
+NEUTRAL_WORDS = ("neutral", "nothing", "silence", "silent", "idle", "background", "noise", "ambient")
+
+GATE_BAND_HZ = (300.0, 10000.0)  # where the struck objects ring
+# Ring level = how far the 2 strongest bins in the band stand out (one ring partial is ~2 bins wide).
+# Tuned on a simulation of the app's FFT pipeline: about 18 dB more sensitive to a one-mode bottle
+# than a 10-bin average, with no false openings in quiet, a 12 dB louder room or a new fan tone.
+LEVEL_TOP_BINS = 2
+GATE_MARGIN_DB = 4.0  # gate sits this far above the typical quiet-room level
+
+
+def spectrum_db(amps) -> np.ndarray:
+    return 20.0 * np.log10(np.asarray(amps, dtype=np.float64) + 1.0)
+
+
+def frame_level_db(amps, freqs=None, floor_db=None) -> float:
+    """Loudness of one FFT frame in dB, used by the gate (quieter frames are Neutral).
+
+    With a calibrated noise floor (per-bin quiet-room spectrum), it is how far the
+    strongest bins between 300 Hz and 10 kHz stand out above the floor, compared with
+    the typical bin. A narrow ring stands out even when soft, while a room or fan that
+    simply gets louder everywhere does not. Without a floor it is the frame's overall level.
+    """
+    if floor_db is None or len(floor_db) != len(amps):
+        return float(10.0 * np.log10(np.mean(np.asarray(amps, dtype=np.float64) ** 2) + 1e-12))
+    excess = spectrum_db(amps) - floor_db
+    if freqs is not None and len(freqs) == len(excess):
+        freqs = np.asarray(freqs)
+        band = (freqs >= GATE_BAND_HZ[0]) & (freqs <= GATE_BAND_HZ[1])
+        if band.any():
+            excess = excess[band]
+    k = min(LEVEL_TOP_BINS, len(excess))
+    return float(np.mean(np.partition(excess, -k)[-k:]) - np.median(excess))
+
+
+def calibrate_noise(frames, freqs) -> tuple[np.ndarray, float, float]:
+    """From frames of a quiet room: (per-bin noise floor in dB, gate in dB, spread in dB).
+
+    The gate uses the median quiet level, so one click or cough during calibration does not
+    push it up; `spread` (p99 - median) shows how steady the room was.
+    """
+    frames = np.asarray(frames, dtype=np.float64)
+    floor_db = np.median(spectrum_db(frames), axis=0)
+    levels = np.array([frame_level_db(f, freqs, floor_db) for f in frames])
+    gate = float(np.median(levels) + GATE_MARGIN_DB)
+    spread = float(np.percentile(levels, 99) - np.median(levels))
+    return floor_db, gate, spread
+
+
+def neutral_class(classes: list[str]) -> str:
+    """Name of the Neutral class among `classes`, or "Neutral" if there is none."""
+    names = [str(name) for name in classes]
+    for name in names:
+        if name.strip().lower() == "neutral":
+            return name
+    for name in names:
+        words = re.split(r"[^a-z]+", name.lower())
+        if any(word in NEUTRAL_WORDS for word in words):
+            return name
+    return "Neutral"
+
+
+class LabelSmoother:
+    """Turns per-frame guesses into a steady label.
+
+    A tap is shown once `enter_frames` frames in a row are not Neutral (the most common
+    tap class among them is shown) and then held for at least `hold_frames`. It goes back
+    to Neutral after `exit_frames` Neutral frames in a row. Switching straight to the
+    other tap class needs `enter_frames` frames of it in a row.
+    """
+
+    def __init__(self, neutral: str, enter_frames: int = 3, exit_frames: int = 3, hold_frames: int = 18):
+        self.neutral = neutral
+        self.enter_frames = max(1, int(enter_frames))
+        self.exit_frames = max(1, int(exit_frames))
+        self.hold_frames = max(0, int(hold_frames))
+        self.reset()
+
+    def reset(self):
+        self.current = self.neutral
+        self.streak = []  # recent non-Neutral guesses while showing Neutral
+        self.shown = 0  # frames the current tap label has been shown
+        self.neutral_run = 0
+        self.other, self.other_count = None, 0
+
+    def update(self, raw: str) -> str:
+        if self.current == self.neutral:
+            if raw == self.neutral:
+                self.streak = []
+                return self.current
+            self.streak.append(raw)
+            if len(self.streak) >= self.enter_frames:
+                # most common tap class; ties go to the most recent frame
+                self.current = max(reversed(self.streak), key=self.streak.count)
+                self.streak, self.shown, self.neutral_run = [], 0, 0
+                self.other, self.other_count = None, 0
+            return self.current
+
+        self.shown += 1
+        if raw == self.neutral:
+            self.neutral_run += 1  # Neutral frames don't cancel a pending switch to the other tap class
+            if self.neutral_run >= self.exit_frames and self.shown >= self.hold_frames:
+                self.reset()
+            return self.current
+        self.neutral_run = 0
+        if raw == self.current:
+            self.other_count = 0
+            return self.current
+        if raw == self.other:
+            self.other_count += 1
+        else:
+            self.other, self.other_count = raw, 1
+        if self.other_count >= self.enter_frames:
+            self.current, self.shown = raw, 0
+            self.other, self.other_count = None, 0
+        return self.current
 
 
 def get_ear(device: int) -> StreamAnalyzer:
@@ -79,7 +202,10 @@ def preprocess_data(X: np.ndarray) -> np.ndarray:
     Returns:
         np.ndarray: (N, D) the preprocessed array in the same shape.
     """
-    return X
+    # Log magnitudes, minus each frame's mean: the classifier sees spectral shape, not loudness,
+    # so a soft and a hard tap on the same object look alike.
+    X = np.log10(np.asarray(X, dtype=np.float64) + 1.0)
+    return X - X.mean(axis=1, keepdims=True)
 
 
 def train_model(
@@ -107,6 +233,7 @@ def train_model(
             random_state=1,
             max_iter=10_000,
             dual="auto",
+            class_weight="balanced",  # Neutral usually has many more frames than each tap class
         )
     elif model_type == MODEL_POLY_SVC:
         # Port from Java Weka.
@@ -125,6 +252,8 @@ def train_model(
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
+    # The scaler is part of the saved model, so training and inference scale features the same way.
+    model = Pipeline([("scale", StandardScaler()), ("svm", model)])
     model.fit(X, y)
     return model, class_names
 
@@ -143,6 +272,25 @@ def predict(model: Any, X: np.ndarray) -> np.ndarray:
     # returns the index of some class name
     y_pred = model.predict(X)
     return y_pred
+
+
+def predict_confident(model: Any, X: np.ndarray, neutral_index: int | None, min_margin: float) -> np.ndarray:
+    """Like predict(), but a tap the model is unsure about becomes Neutral.
+
+    "Unsure" means the winning class's score is within `min_margin` of the runner-up. On this
+    project's recordings, a margin of 0.5 cut false taps on everyday sounds by about a third
+    while keeping most tap frames.
+    """
+    labels = np.asarray(predict(model, X))
+    if neutral_index is None or min_margin <= 0 or not hasattr(model, "decision_function"):
+        return labels
+    scores = np.asarray(model.decision_function(X))
+    if scores.ndim == 1:  # two classes: distance from the boundary
+        margin = np.abs(scores)
+    else:
+        top2 = np.sort(scores, axis=1)[:, -2:]
+        margin = top2[:, 1] - top2[:, 0]
+    return np.where((labels != neutral_index) & (margin < min_margin), neutral_index, labels)
 
 
 def _format_c_float(value: float) -> str:
@@ -186,11 +334,21 @@ def export_model_header(model: Any, classes: list[str], save_path: Path):
     prediction helpers. It supports LinearSVC-style models with coef_,
     intercept_, and classes_ attributes.
     """
+    scaler = None
+    if isinstance(model, Pipeline):
+        scaler = model.named_steps.get("scale")
+        model = model.named_steps["svm"]
     if not all(hasattr(model, attr) for attr in ("coef_", "intercept_", "classes_")):
         raise ValueError("Header export currently supports LinearSVC-style models only")
 
-    weights = np.asarray(model.coef_, dtype=np.float32)
-    biases = np.asarray(model.intercept_, dtype=np.float32)
+    coef = np.asarray(model.coef_, dtype=np.float64)
+    intercept = np.asarray(model.intercept_, dtype=np.float64)
+    if scaler is not None:
+        # Fold the scaler into the linear model: w.(x - mean)/scale + b = (w/scale).x + (b - w.mean/scale)
+        intercept = intercept - (coef * scaler.mean_ / scaler.scale_).sum(axis=1)
+        coef = coef / scaler.scale_
+    weights = coef.astype(np.float32)
+    biases = intercept.astype(np.float32)
     model_classes = np.asarray(model.classes_)
 
     if weights.ndim != 2:
@@ -238,7 +396,9 @@ def export_model_header(model: Any, classes: list[str], save_path: Path):
 #endif
 
 // Generated from a scikit-learn linear model.
-// The feature vector must match the Python FFT preprocessing exactly.
+// The feature vector must match the Python FFT preprocessing exactly:
+// take log10(amplitude + 1) of every bin, then subtract the mean of all bins.
+// The Python app also treats frames below its loudness gate as Neutral; the gate is not exported.
 #define VIBRATION_MODEL_NUM_CLASSES {len(class_names)}
 #define VIBRATION_MODEL_NUM_FEATURES {num_features}
 #define VIBRATION_MODEL_NUM_SCORE_ROWS {num_score_rows}
@@ -308,6 +468,7 @@ def save_model(model: Any, classes: list[str], save_path: Path):
         "model": model,
         "classes": classes,
         "model_type": type(model).__name__,
+        "preprocess": PREPROCESS_VERSION,
     }
 
     with open(save_path, "wb") as f:
@@ -326,4 +487,6 @@ def load_model(file_path: Path) -> tuple[Any, list[str]]:
 
     with open(file_path, "rb") as f:
         payload = pickle.load(f)
+    if payload.get("preprocess") != PREPROCESS_VERSION:
+        raise ValueError("This model was trained with different preprocessing; retrain it in this version.")
     return payload["model"], payload["classes"]

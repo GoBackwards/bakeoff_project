@@ -1,5 +1,7 @@
 # Piezo Vibration Classification Starter
 
+> **Our bakeoff project** is built on the MIT-licensed course starter at <https://github.com/hilab-open-source/vibration-interaction-bakeoff>. We use the laptop's built-in microphone: a spoon tapping a steel water bottle is Interaction 1, tapping a ceramic bowl is Interaction 2, and everything else is Neutral. See [docs/PRESENTER_NOTES.md](docs/PRESENTER_NOTES.md) for what we changed and why.
+
 ## Overview
 
 This course starter lets you collect examples of vibrations, train a classifier, and run live inference on a laptop. A piezo sensor connected to the laptop's audio input acts as a contact microphone. A Dear PyGui desktop application calculates and displays FFT features, records labeled examples, trains a scikit-learn model, and shows predictions.
@@ -78,24 +80,28 @@ The application plots the live FFT spectrum with frequency in hertz on the x-axi
 
 To train and use a model:
 
-1. Choose a model. `LinearSVC` is the default and can be exported for ESP32.
-2. Add at least two classes, such as `tap` and `scratch`.
-3. Select a class and click **Record Data**.
-4. Repeat the interaction under varied conditions, then stop recording.
-5. Collect examples for every class and click **Train Model**.
-6. Switch to **Infer** to view live predictions.
-7. Optionally save the trained `.model` file.
+1. Click **Calibrate Quiet** and keep the room quiet for the next 3 s. Frames quieter than the resulting gate are treated as Neutral and are not recorded for the tap classes.
+2. Choose a model. `LinearSVC` is the default and can be exported for ESP32.
+3. Add a `neutral` class and at least one tap class, such as `bottle` and `bowl`.
+4. Select a class and click **Record Data**. For `neutral`, make everyday sounds (talking, typing, table taps) without making the objects ring.
+5. Repeat the interaction under varied conditions, then stop recording. Recordings are saved automatically and reloaded at the next start.
+6. Collect examples for every class and click **Train Model**.
+7. Use **Infer** to view live predictions. **frames to switch** sets how many non-Neutral frames in a row are needed before a tap is shown; **sureness** (press Enter after typing) turns uncertain taps into Neutral. The trained model is not reloaded at the next start: train again or use **Load Model**.
+8. Optionally save the trained `.model` file.
 
 Collect all classes with the same sensor mounting, input gain, and object setup. Physical changes can shift the vibration spectrum and reduce accuracy.
 
 ## How it works
 
-1. The laptop audio input captures mono samples from the piezo sensor.
-2. `StreamAnalyzer` divides the stream into windows and calculates FFT amplitudes.
-3. `get_audio_features()` returns 512 frequency bins for visualization and data collection.
-4. `preprocess_data()` prepares each feature vector; the starter currently returns it unchanged.
-5. The selected scikit-learn classifier learns from the labeled vectors.
-6. The same feature pipeline feeds the model during live laptop inference.
+1. The laptop audio input captures mono samples from the piezo sensor or the built-in microphone.
+2. `StreamAnalyzer` computes FFT amplitudes of the latest 50 ms of audio about 44 times per second (1103 bins at 44.1 kHz).
+3. `get_audio_features()` returns those amplitudes for visualization and data collection.
+4. A loudness gate (`frame_level_db()`, calibrated by **Calibrate Quiet**) marks frames whose strongest frequencies do not stand out above the room's noise as Neutral.
+5. `preprocess_data()` takes log magnitudes and removes each frame's average, so the classifier sees spectral shape rather than loudness.
+6. The selected scikit-learn classifier, wrapped with a `StandardScaler`, learns from the labeled vectors.
+7. The same feature pipeline feeds the model during live inference; `LabelSmoother` and the sureness threshold steady the displayed label.
+
+See [docs/PRESENTER_NOTES.md](docs/PRESENTER_NOTES.md) for what we changed from the starter and why.
 
 The graph uses a fixed maximum amplitude of `500000` to make signal levels easier to compare. Input devices may have different sample rates, gains, and analog conditioning, so data may not transfer directly between setups.
 
@@ -145,7 +151,7 @@ This starter does not currently include an automated test suite. For a functiona
 
 ### The FFT plot does not react
 
-- Select the piezo input rather than the built-in microphone.
+- Select the input you trained with (the piezo input, or the built-in microphone for our project).
 - Check the audio adapter, input gain, and piezo wiring.
 - Try a gentle tap and watch the peak-amplitude readout.
 
@@ -166,7 +172,10 @@ This starter does not currently include an automated test suite. For a functiona
 | `src/stream_reader.py` | Audio-device discovery and capture |
 | `src/utils.py` | Signal-processing utilities |
 | `export_model_header.py` | Converts a Linear SVM to C++ |
+| `tools/gonogo.py` | Hardware go/no-go test for a candidate pair of struck objects (written for an earlier steel bowl / glass jar design) |
+| `src/svm_whistle_hiss.*` | Starter example model (old raw-amplitude features; not loadable by this version) |
+| `docs/PRESENTER_NOTES.md` | What we changed from the starter and why |
 | `assets/` | Interface screenshots |
-| `metadata/` | Saved application preferences |
+| `metadata/` | Saved preferences, recordings (`dataset.pkl`) and calibration (`calibration.pkl`); not committed |
 | `pyproject.toml` / `uv.lock` | Python environment |
 | `LICENSE` | MIT license |
