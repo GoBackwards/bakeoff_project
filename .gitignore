@@ -221,3 +221,6 @@ gonogo_runs/
 # saved models (keep the starter example)
 *.model
 !src/svm_whistle_hiss.model
+
+# bakeoff trial logs (participant IDs stay on this laptop)
+results/

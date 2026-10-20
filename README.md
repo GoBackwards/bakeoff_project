@@ -1,6 +1,11 @@
 # Piezo Vibration Classification Starter
 
-> **Our bakeoff project** is built on the MIT-licensed course starter at <https://github.com/hilab-open-source/vibration-interaction-bakeoff>. We use the laptop's built-in microphone: a spoon tapping a steel water bottle is Interaction 1, tapping a ceramic bowl is Interaction 2, and everything else is Neutral. See [docs/PRESENTER_NOTES.md](docs/PRESENTER_NOTES.md) for what we changed and why.
+> **Our bakeoff project, Clink,** is built on the MIT-licensed course starter at <https://github.com/hilab-open-source/vibration-interaction-bakeoff>. We use the laptop's built-in microphone: a spoon tapping a steel water bottle is Interaction 1 ("Water, please"), tapping a ceramic bowl is Interaction 2 ("Please come"), and everything else is Neutral.
+>
+> - [docs/STORY.md](docs/STORY.md): the product story, the demo script and the experimenter guide for bakeoff trials.
+> - [docs/PRESENTER_NOTES.md](docs/PRESENTER_NOTES.md): how the classifier works and what we changed from the starter.
+>
+> The app has three screens: SETUP, TRAIN and DEMO. On DEMO, SPACE starts a bakeoff trial and SPACE again stops it, then the app shows the set of labels seen in between and PASS or FAIL.
 
 ## Overview
 
@@ -18,7 +23,9 @@ You will create a custom vibration recognizer—for example, a classifier for ta
 4. Train and evaluate a classifier on the laptop.
 5. Optionally export a Linear SVM for ESP32.
 
-![Vibration classification interface showing live FFT features](assets/fft_gui.png)
+![The Clink DEMO screen: live label, product view and bakeoff trial recorder](assets/clink_demo.png)
+
+*The DEMO screen. For this screenshot, a test script simulated the bottle request.*
 
 ## How this starter differs from the other audio starters
 
@@ -78,16 +85,28 @@ Choose the input device connected to the piezo sensor. The application remembers
 
 The application plots the live FFT spectrum with frequency in hertz on the x-axis and amplitude on the y-axis. A peak readout shows the strongest frequency and its current amplitude.
 
+The top of the window always shows the live label (NOW HEARING) and the ring-level meter with the gate. The buttons at the top switch between three screens.
+
 To train and use a model:
 
-1. Click **Calibrate Quiet** and keep the room quiet for the next 3 s. Frames quieter than the resulting gate are treated as Neutral and are not recorded for the tap classes.
-2. Choose a model. `LinearSVC` is the default and can be exported for ESP32.
-3. Add a `neutral` class and at least one tap class, such as `bottle` and `bowl`.
+1. **SETUP:** click **Calibrate Quiet** and keep the room quiet for the next 3 s. Frames quieter than the resulting gate are treated as Neutral and are not recorded for the tap classes.
+2. **TRAIN:** choose a model. `LinearSVC` is the default and can be exported for ESP32.
+3. Add a `neutral` class and the tap classes `bottle` and `bowl`. The trial recorder maps classes with these names to Interaction 1 and 2; you can change the mapping in SETUP.
 4. Select a class and click **Record Data**. For `neutral`, make everyday sounds (talking, typing, table taps) without making the objects ring.
 5. Repeat the interaction under varied conditions, then stop recording. Recordings are saved automatically and reloaded at the next start.
-6. Collect examples for every class and click **Train Model**.
-7. Use **Infer** to view live predictions. **frames to switch** sets how many non-Neutral frames in a row are needed before a tap is shown; **sureness** (press Enter after typing) turns uncertain taps into Neutral. The trained model is not reloaded at the next start: train again or use **Load Model**.
-8. Optionally save the trained `.model` file.
+6. Collect examples for every class and click **Train Model**. The app switches to **DEMO** when the model is live. Every trained model is also kept in `metadata/last_trained.model` and loaded again at the next start.
+7. In SETUP, **frames to switch** sets how many non-Neutral frames in a row are needed before a tap is shown, and **sureness** (press Enter after typing) turns uncertain taps into Neutral. We use 5 and 0.50.
+8. Optionally save the trained `.model` file, or load one with **Load Model**.
+
+To run bakeoff trials on **DEMO**:
+
+1. The app starts with participant P1. Use **Next participant** for each new person.
+2. Read the bold line aloud, press **SPACE**, let the participant act, then press **SPACE** again. The banner shows the set (for example `{Neutral, Bottle}`) and PASS or FAIL, using the slide rules.
+3. The recorder selects the three practice runs first (shown, never counted), then 5 trials each of Positive and Negative for both interactions. You can click another trial type at any time.
+4. **Esc** cancels a running trial (INVALID, not counted). **Void last trial** undoes an experimenter mistake. **Copy numbers** copies the two spreadsheet rows.
+5. Every trial is logged to `results/trials_<date>_<time>.csv`.
+
+See [docs/STORY.md](docs/STORY.md#running-a-bakeoff-trial-experimenter-guide) for the full experimenter guide.
 
 Collect all classes with the same sensor mounting, input gain, and object setup. Physical changes can shift the vibration spectrum and reduce accuracy.
 
@@ -100,10 +119,11 @@ Collect all classes with the same sensor mounting, input gain, and object setup.
 5. `preprocess_data()` takes log magnitudes and removes each frame's average, so the classifier sees spectral shape rather than loudness.
 6. The selected scikit-learn classifier, wrapped with a `StandardScaler`, learns from the labeled vectors.
 7. The same feature pipeline feeds the model during live inference; `LabelSmoother` and the sureness threshold steady the displayed label.
+8. `trial.py` turns the displayed label of every fresh frame between two SPACE presses into the trial's set, judges it with the slide rules, keeps the per-participant tally and writes the CSV log.
 
 See [docs/PRESENTER_NOTES.md](docs/PRESENTER_NOTES.md) for what we changed from the starter and why.
 
-The graph uses a fixed maximum amplitude of `500000` to make signal levels easier to compare. Input devices may have different sample rates, gains, and analog conditioning, so data may not transfer directly between setups.
+The graph shows frequencies up to 10 kHz. Its amplitude axis jumps up to fit a loud sound and then falls back over a few seconds, so both a quiet room and a ring are readable on the built-in microphone. Input devices may have different sample rates, gains, and analog conditioning, so data may not transfer directly between setups.
 
 ## Customize the starter
 
@@ -138,7 +158,13 @@ The export creates model code only. Your ESP32 firmware must separately sample t
 
 ## Test and verify
 
-This starter does not currently include an automated test suite. For a functional check, launch the application, confirm the selected input produces a changing FFT plot, record two classes, train a model, and verify that **Infer** displays predictions.
+The trial logic has unit tests (standard library only):
+
+```bash
+uv run python -m unittest tests.test_trial
+```
+
+For a functional check, launch the application, confirm that the selected input produces a changing spectrum, record the classes, train a model, and run one mock participant on **DEMO**.
 
 ## Troubleshooting
 
@@ -166,7 +192,9 @@ This starter does not currently include an automated test suite. For a functiona
 
 | Path | Purpose |
 | --- | --- |
-| `visualizer.py` | Desktop training and inference application |
+| `visualizer.py` | Desktop app: SETUP / TRAIN / DEMO screens, live label, product view, trial recorder |
+| `trial.py` | Bakeoff trial rules, per-participant tally and CSV log (no GUI; unit-tested) |
+| `tests/test_trial.py` | Unit tests for `trial.py` |
 | `models.py` | Features, models, persistence, and export |
 | `src/stream_analyzer.py` | Audio buffering and FFT analysis |
 | `src/stream_reader.py` | Audio-device discovery and capture |
@@ -174,8 +202,10 @@ This starter does not currently include an automated test suite. For a functiona
 | `export_model_header.py` | Converts a Linear SVM to C++ |
 | `tools/gonogo.py` | Hardware go/no-go test for a candidate pair of struck objects (written for an earlier steel bowl / glass jar design) |
 | `src/svm_whistle_hiss.*` | Starter example model (old raw-amplitude features; not loadable by this version) |
+| `docs/STORY.md` | Product story, demo script, experimenter guide, hard questions |
 | `docs/PRESENTER_NOTES.md` | What we changed from the starter and why |
 | `assets/` | Interface screenshots |
-| `metadata/` | Saved preferences, recordings (`dataset.pkl`) and calibration (`calibration.pkl`); not committed |
+| `metadata/` | Saved preferences, recordings (`dataset.pkl`), calibration (`calibration.pkl`) and the last trained model; not committed |
+| `results/` | Trial logs, one CSV per app run that ran trials; not committed |
 | `pyproject.toml` / `uv.lock` | Python environment |
 | `LICENSE` | MIT license |

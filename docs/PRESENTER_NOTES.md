@@ -1,6 +1,6 @@
 # Presenter notes: what we adjusted and why
 
-These notes explain how our vibration classifier works and what we changed from the course starter app, so the presenter can explain it during the demo and answer questions.
+These notes explain how our vibration classifier works and what we changed from the course starter app, so the presenter can explain it during the demo and answer questions. The product story ("Clink"), the 60-second pitch and the experimenter guide for the bakeoff trials are in [STORY.md](STORY.md).
 
 ## The idea in one sentence
 
@@ -27,6 +27,8 @@ Everyday objects become buttons: **tapping the steel water bottle with a spoon i
 | The app froze after stopping one recording and starting another | The spectrum is now updated from a steady loop instead of a chain of "call me next frame" requests (which broke for good when one request came late), and saving runs in the background | 25 s of repeated record / stop / switch cycles with no pause longer than 0.03 s |
 | Recordings were lost whenever the app closed | Recordings and the calibration are saved automatically, safely (a crash mid-save cannot corrupt them), and reloaded at start. The trained model is not reloaded: train again or use Load Model | Data survives restarts |
 | Starter bugs | Fixed the swapped Clear All / Delete All buttons, the Train button that could stay disabled, errors that froze the app, microphone switching, and duplicate frames being recorded | — |
+| The starter screen was a developer tool | A product screen with three views: SETUP (microphone, calibration, settings, checklist), TRAIN (record and train), and DEMO (the "Clink" view: a large live label, request tiles with counters, a request history). The spectrum marks each object's ring frequencies and rescales itself. The last trained model loads again at start | Readable from across a room; the demo starts without retraining |
+| No way to run the bakeoff trials in the app | **Trial recorder** on DEMO: SPACE starts a trial, SPACE again stops it, and the app shows the set of displayed labels and PASS / FAIL by the slide rules. It also handles practice runs, 5 trials per type, a tally in the spreadsheet's layout, Esc to cancel, Void last trial and a CSV log. A trial starts only after 0.3 s of Neutral, so an earlier tap cannot leak in | Tested with 74 unit tests, a headless run of a full participant, and real SPACE / Esc key presses in the live window |
 
 We also wrote a hardware go/no-go test (`tools/gonogo.py`, about an hour of recording) for checking that a pair of objects can be told apart from each other and from everyday sounds before committing to them. It was written while we were considering a steel bowl and a glass jar.
 
@@ -43,11 +45,12 @@ All from our own recordings and simulations, not from the live bakeoff:
 
 1. Start the app: `uv run visualizer.py`.
 2. Keep the laptop plugged in; turn off microphone noise cancellation (Armoury Crate "AI Noise Cancelation", Windows audio enhancements).
-3. In the demo room, press **Calibrate Quiet** and keep everyone quiet for the next 3 s, until the status line shows the gate (about 11-13 dB in our tests; much higher values discard soft taps). Our laptop currently has a hand-raised gate of 24.8 dB saved, so always recalibrate. Recalibrate again if the room changes.
-4. In Train mode, click **Train Model** (a few seconds; it switches to Infer when done), or use **Load Model** for a saved `.model` file. The model is not reloaded automatically.
-5. In Infer mode, set **frames to switch = 5** (our laptop currently has 3 saved) and **sureness = 0.50** (type it and press Enter).
-6. Quick self-test: silence stays Neutral; talking and typing stay Neutral; a firm tap on each object shows the right label.
-7. Tap **firmly** with the spoon. Very light taps, whose ring does not stand out roughly 15-20 dB above the room for at least a tenth of a second, are treated as Neutral by design.
+3. In the demo room, open **SETUP**, press **Calibrate Quiet** and keep everyone quiet for the next 3 s, until the status line shows the gate (about 11-13 dB in our tests; much higher values discard soft taps). Our laptop currently has a hand-raised gate of 24.8 dB saved, and the app warns about it, so always recalibrate. Recalibrate again if the room changes.
+4. Make sure a model is live. The last trained model loads by itself at start; otherwise click **Train Model** in TRAIN (a few seconds) or use **Load Model**. The app switches to DEMO when the model is live.
+5. In SETUP, set **frames to switch = 5** (our laptop currently has 3 saved) and **sureness = 0.50** (type it and press Enter). The "Ready for the demo?" checklist should then show every box ticked.
+6. Quick self-test on DEMO: silence stays Neutral; talking and typing stay Neutral; a firm tap on each object shows the right label and request.
+7. Run one mock trial: click **Practice: Bottle**, press SPACE, tap the bottle, wait half a second, press SPACE. The banner should read `PASS {Neutral, Bottle}`. Then click **Next participant** (or restart the app) so the real participants start fresh.
+8. Tap **firmly** with the spoon. Very light taps, whose ring does not stand out roughly 15-20 dB above the room for at least a tenth of a second, are treated as Neutral by design.
 
 ## Likely questions
 
@@ -66,5 +69,6 @@ All from our own recordings and simulations, not from the live bakeoff:
 | What | Where |
 |---|---|
 | Gate, calibration maths, smoothing, sureness, features | `models.py`: `frame_level_db`, `calibrate_noise`, `LabelSmoother`, `predict_confident`, `preprocess_data`, `train_model` |
-| App, buttons, recording, saving, main loop | `visualizer.py` |
+| App screens, buttons, recording, saving, live label, product view, SPACE handling, main loop | `visualizer.py` |
+| Bakeoff trial rules, tally, CSV log | `trial.py` (tests in `tests/test_trial.py`) |
 | Hardware go/no-go test | `tools/gonogo.py` |
