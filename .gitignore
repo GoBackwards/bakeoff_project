@@ -214,3 +214,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# go/no-go test recordings (tools/gonogo.py)
+gonogo_runs/
