@@ -81,9 +81,9 @@ How the app puts Neutral first:
 
 ## What the app shows
 
-`uv run visualizer.py` opens one window with three screens, switched with the buttons at the top. Two things show on every screen:
-- **NOW HEARING card:** the live label in large type with its request: grey "Neutral - Listening", blue "Bottle - Water, please" or amber "Bowl - Please come". A small "this frame" line shows the model's guess before smoothing.
-- **Ring level meter:** a bar with a yellow tick at the gate. It twitches when you talk and jumps past the tick when an object rings.
+`uv run visualizer.py` opens one window with a calm light look (linen page, white cards). The top bar shows the name, the tagline and the SETUP / TRAIN / DEMO switch, plus a red note only when something is missing (no model, no microphone). Two things show on every screen:
+- **NOW HEARING card:** the live label in large type with its request. It is white with grey "Neutral - Listening", and the whole card turns solid sky blue for "Bottle - Water, please" or amber for "Bowl - Please come".
+- **Ring level meter:** a bar with a dark tick at the gate. It twitches when you talk and jumps past the tick when an object rings. On SETUP and TRAIN a small "raw:" note shows the model's guess before smoothing.
 
 **SETUP:**
 - Microphone choice and **Calibrate Quiet**, with a progress bar and the gate in dB.
@@ -95,7 +95,7 @@ How the app puts Neutral first:
 
 **DEMO** (opens by itself once a model is live):
 - **Left, the product view:**
-  - "Clink" and the tagline, then a request headline such as "Water, please - 14:32" in the object's colour, held for 3 s so people can read it.
+  - A request headline: "All quiet", or for example "Water, please - 14:32" in the object's colour, held for 3 s so people can read it.
   - Two tiles: "Tap the bottle: Water, please" and "Tap the bowl: Please come". A tile flashes on its request, and its counter ("water requests", "calls") goes up by one per request. A request is counted once each time the shown label changes to that object, never once per frame.
   - A short history with times, and a small spectrum.
 - **Right, the bakeoff trial recorder:** see the next section.
@@ -119,9 +119,9 @@ Before the participants arrive:
 
 For each participant:
 1. The app starts with participant **P1**. For the next person, type the ID in the box next to **Next participant** (it suggests P2, P3...) and click the button.
-2. **Practice:** the recorder selects Practice Neutral, then Practice Bottle, then Practice Bowl. For each one, read the bold line aloud. You may explain and help. Press **SPACE**, let them act, then press **SPACE** again. Practice is shown but never counted, and each practice can be run once.
+2. **Practice:** the recorder selects Practice Neutral, then Practice Bottle, then Practice Bowl. For each one, read the line in the box under the banner aloud. You may explain and help. Press **SPACE**, let them act, then press **SPACE** again. Practice is shown but never counted, and each practice can be run once. Practice Neutral has no verdict: the banner shows DONE with the set, for example `DONE {Neutral}`.
 3. **Real trials:** the recorder then selects Positive Bottle, Positive Bowl, Negative Bottle and Negative Bowl in turn, 5 of each. You can click another trial type at any time. For each trial:
-   - Read only the bold line, for example "Tap the bottle." or "Anything but the bottle.", and give no help.
+   - Read only the line in the box, for example "Tap the bottle." or "Anything but the bottle.", and give no help. The small caption above it says whether you may help.
    - Press **SPACE** and say "go".
    - After a tap, wait about half a second before pressing **SPACE** again. The label appears about 0.15-0.25 s after the tap.
    - The banner shows **PASS** or **FAIL** with the set, for example `PASS {Neutral, Bottle}`, and the tally table updates.

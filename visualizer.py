@@ -20,6 +20,7 @@ import re
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from math import cos, pi, sin
 from pathlib import Path
 
@@ -52,6 +53,7 @@ PRODUCT = {
     "name": "Clink",
     "tagline": "Ask for help from bed by tapping what's on the nightstand.",
     "hint": "One firm spoon tap, then let it ring. Gentle taps are ignored.",
+    "idle": "All quiet",  # the product headline when no request is showing
     T.NEUTRAL: {"name": "Neutral", "request": "Listening"},
     T.I1: {"name": "Bottle", "request": "Water, please", "how": "TAP THE BOTTLE", "counter": "water requests",
            "ring_hz": (360, 740, 1360)},
@@ -59,39 +61,102 @@ PRODUCT = {
            "ring_hz": (640, 1280, 3100)},
 }
 
-# What the experimenter reads to the participant before each trial type.
+# What the experimenter reads to the participant before each trial type (the note above it says how).
 SAY = {
-    T.PRACTICE_NEUTRAL: 'Practice: "For a few seconds, do anything except tap the bottle or the bowl."  (you may help)',
-    T.PRACTICE_I1: 'Practice: "Hold the spoon like a little hammer. One firm tap on the side of the bottle, at the '
-                   'dot, and let it ring."  (you may help)',
-    T.PRACTICE_I2: 'Practice: "Now the bowl: one firm tap on the side, at the dot, and let it ring."  (you may help)',
-    T.POS_I1: 'Say only: "Tap the bottle."  (no help)',
-    T.POS_I2: 'Say only: "Tap the bowl."  (no help)',
-    T.NEG_I1: 'Say only: "Anything but the bottle."  (tapping the bowl is allowed; no help)',
-    T.NEG_I2: 'Say only: "Anything but the bowl."  (tapping the bottle is allowed; no help)',
+    T.PRACTICE_NEUTRAL: '"For a few seconds, do anything except tap the bottle or the bowl."',
+    T.PRACTICE_I1: '"Hold the spoon like a hammer. One firm tap on the side of the bottle, at the dot. Let it ring."',
+    T.PRACTICE_I2: '"Now the bowl: one firm tap on the side, at the dot, and let it ring."',
+    T.POS_I1: '"Tap the bottle."',
+    T.POS_I2: '"Tap the bowl."',
+    T.NEG_I1: '"Anything but the bottle."',
+    T.NEG_I2: '"Anything but the bowl."',
+}
+_PRACTICE_NOTE = "PRACTICE - READ THIS ALOUD. YOU MAY EXPLAIN AND HELP"
+SAY_NOTE = {
+    T.PRACTICE_NEUTRAL: _PRACTICE_NOTE, T.PRACTICE_I1: _PRACTICE_NOTE, T.PRACTICE_I2: _PRACTICE_NOTE,
+    T.POS_I1: "SAY ONLY THIS - NO HELP",
+    T.POS_I2: "SAY ONLY THIS - NO HELP",
+    T.NEG_I1: "SAY ONLY THIS - NO HELP - TAPPING THE BOWL IS ALLOWED",
+    T.NEG_I2: "SAY ONLY THIS - NO HELP - TAPPING THE BOTTLE IS ALLOWED",
 }
 TYPE_KEY = {T.PRACTICE_NEUTRAL: "PN", T.PRACTICE_I1: "P1", T.PRACTICE_I2: "P2",
             T.POS_I1: "POS1", T.POS_I2: "POS2", T.NEG_I1: "NEG1", T.NEG_I2: "NEG2"}
 TALLY_CELL = {T.POS_I1: (0, 1), T.POS_I2: (0, 2), T.NEG_I1: (1, 1), T.NEG_I2: (1, 2)}  # (row, column)
-KEY_HINTS = "DEMO keys:  SPACE start/stop trial   Shift+SPACE start anyway   Esc cancel trial   F11 full screen"
+KEY_HINTS = "SPACE start / stop     Shift+SPACE start anyway     Esc cancel     F11 full screen"
 
 # ——— Look ———
 
+# "Linen & Ink": a calm light theme. Every color means one thing: ink is the only chrome color, sky blue is the
+# bottle and amber the bowl (nothing else uses them), solid red is RECORDING, green/red outlines are PASS/FAIL,
+# stone grey is "not now". Text colors were checked for contrast (ink 15.8:1, muted 5.8:1 on white).
 C = {
-    "bg": (15, 17, 21), "card": (23, 26, 33), "card2": (30, 34, 43), "frame": (37, 41, 54),
-    "frame_hi": (48, 53, 69), "frame_act": (58, 64, 83), "border": (48, 53, 66),
-    "text": (231, 234, 240), "muted": (139, 146, 160),
-    "accent": (129, 140, 248), "accent_fill": (79, 70, 229),
-    "neutral": (156, 163, 175), "i1": (56, 189, 248), "i2": (251, 146, 60),  # bottle blue, bowl amber
-    "ok": (21, 128, 61), "bad": (185, 28, 28), "rec": (225, 29, 72), "ready": (51, 65, 85), "wait": (161, 98, 7),
-    "info": (30, 64, 175), "warn_text": (250, 204, 21), "ok_text": (74, 222, 128), "bad_text": (248, 113, 113),
+    # surfaces
+    "bg": (246, 243, 237),  # linen page
+    "card": (255, 255, 255),  # cards, popups, modals, plot
+    "card2": (250, 248, 244),  # read-aloud box, DONE banner
+    "frame": (240, 236, 229),  # inputs, secondary buttons, mode-switch track
+    "frame_hi": (232, 227, 218),
+    "frame_act": (222, 216, 205),
+    "border": (225, 219, 208),  # hairline: cards, inputs, secondary buttons
+    "border_light": (236, 231, 223),  # table row lines, meter track
+    "border_strong": (200, 193, 181),  # outline of WAIT / INVALID / DONE banners
+    "stone": (243, 240, 234),  # status card when there is no model or it is not ready
+    "disabled": (246, 245, 243),
+    "scroll": (214, 207, 196),
+    # text
+    "text": (37, 34, 30),  # ink
+    "muted": (107, 100, 91),
+    "faint": (158, 151, 141),  # disabled labels only, never information
+    # chrome: ink instead of a brand accent
+    "accent": (37, 34, 30),
+    "accent_fill": (45, 41, 37),  # primary buttons, selected trial type
+    "accent_hi": (66, 61, 55),
+    "accent_act": (28, 26, 23),
+    # roles: i1/i2 are text-safe inks, *_fill the brand fills (never white text on them), *_on the text on a fill
+    "neutral": (112, 106, 98),
+    "i1": (3, 105, 161), "i1_fill": (56, 189, 248), "i1_on": (8, 47, 73), "i1_icon": (2, 132, 199),
+    "i1_tint": (235, 246, 253), "i1_tint_line": (199, 229, 247), "i1_flash": (204, 236, 252),
+    "i2": (168, 68, 8), "i2_fill": (251, 146, 60), "i2_on": (67, 20, 7), "i2_icon": (234, 88, 12),
+    "i2_tint": (255, 245, 235), "i2_tint_line": (253, 221, 190), "i2_flash": (254, 226, 198),
+    "spoon": (120, 113, 104),
+    # trial states
+    "rec": (220, 38, 38), "rec_hover": (200, 30, 30),  # RECORDING: the only solid red
+    "ready": (255, 255, 255),
+    "ok": (234, 247, 238), "ok_text": (21, 112, 55), "ok_line": (21, 128, 61),
+    "bad": (254, 239, 239), "bad_text": (185, 28, 28), "bad_line": (220, 38, 38),
+    "bad_hair": (246, 205, 205), "bad_hover": (252, 228, 228), "bad_active": (249, 214, 214),
+    "wait": (243, 240, 234),
+    "info": (250, 248, 244),
+    "warn_text": (154, 52, 18),  # rust: only "gate too high" / "no gate"
+    # meter and plot
+    "meter_lo": (178, 170, 158),
+    "plot_line": (70, 65, 59),
 }
+
+# Projector variant, chosen once at startup (PowerShell: $env:CLINK_PROJECTOR=1; uv run visualizer.py).
+# Use it only if a rehearsal on the real projector shows beige linen or a washed-out sky fill.
+C_PROJECTOR = {
+    "bg": (245, 245, 243),  # neutral page if the linen projects beige
+    "i1_fill": (14, 165, 233),  # deeper sky; the navy text on it stays above 5:1
+}
+PROJECTOR = os.environ.get("CLINK_PROJECTOR", "") not in ("", "0")
+if PROJECTOR:
+    C.update(C_PROJECTOR)
+
 ROLE_TAG = {T.NEUTRAL: "n", T.I1: "i1", T.I2: "i2"}
 ROLE_COLOR = {T.NEUTRAL: C["neutral"], T.I1: C["i1"], T.I2: C["i2"]}
+HERO_LOOK = {  # status card: theme, label color, request color, dot fill, dot ring
+    "n": ("th_hero_n", C["neutral"], C["muted"], C["neutral"], C["neutral"]),
+    "i1": ("th_hero_i1", C["i1_on"], C["i1_on"], C["card"], C["i1_on"]),
+    "i2": ("th_hero_i2", C["i2_on"], C["i2_on"], C["card"], C["i2_on"]),
+    "off": ("th_hero_off", C["muted"], C["muted"], C["faint"], C["faint"]),
+    "unmapped": ("th_hero_n", C["text"], C["muted"], C["faint"], C["faint"]),
+}
 MODES = ("SETUP", "TRAIN", "DEMO")
-TOPBAR_H, HERO_H, FOOTER_H = 50, 130, 60
-METER_W, METER_H, METER_TOP_DB, PEAK_FALL_DB_S = 380, 22, 40.0, 20.0
-TILE_H, LOG_ROWS = 220, 2
+TOPBAR_H, HERO_H, FOOTER_H = 52, 116, 44
+METER_W, METER_H, METER_TOP_DB, PEAK_FALL_DB_S = 300, 12, 40.0, 20.0
+TILE_H, LOG_ROWS, SAY_H = 190, 2, 112
+DEMO_X_MAX_HZ = 4000  # the DEMO spectrum shows only where the objects ring, so the marks spread out
 PLOT_MAX_HZ = 10_000  # the objects ring well below this; it is also the top of the gate band
 REQUEST_SHOW_S = 3.0  # a request stays on the product view this long so people can read it
 HIGH_GATE_DB = 18.0  # above this, soft taps are missed
@@ -185,13 +250,17 @@ result_fresh = False  # the banner shows the last trial's result until the next 
 counts = {T.I1: 0, T.I2: 0}  # requests shown on the product view
 history = []  # (time, role), newest first
 request_until = 0.0
+tile_flash = {"i1": False, "i2": False}  # a tile is solid while its request shows
 last_role = T.NEUTRAL
 live_cache = {}
 ui_cache = {}  # last value written to each slow-changing widget
 meter_peak, meter_t = 0.0, 0.0
 plot_bins = {}  # FFT length -> number of bins plotted (up to PLOT_MAX_HZ)
+plot_full_hz = None  # top of the plotted range
 last_status = None
 last_error = None
+STATUS_ALERT = ("Error", "Could not", "failed", "Trial not started", "Nothing to void", "doesn't match",
+                "different microphone", "Record at least")
 
 # ——— Initialization ———
 
@@ -266,7 +335,7 @@ def publish_model(new_model, new_classes, message=None):
     inference = (new_model, new_classes, new_smoother)
     live_cache.clear()
     update_roles()
-    dpg.set_value("model_classes_text", "Model classes: " + ", ".join(new_classes))
+    dpg.set_value("model_classes_text", "Model classes: " + ", ".join(new_classes) + (f"\n{message}" if message else ""))
     if message:
         show_status(message)
     if ready_to_predict():
@@ -291,7 +360,20 @@ def show_status(text):
     last_status = text
     print(text)
     if dpg.does_item_exist("status_text"):
-        dpg.set_value("status_text", text)
+        fit_status()
+        dpg.configure_item("status_text", color=C["bad_text"] if any(k in text for k in STATUS_ALERT) else C["muted"])
+
+
+def fit_status():
+    """The footer shows one line: long messages are shortened to the window width (the console has them all)."""
+    text = last_status or ""
+    try:
+        w = dpg.get_viewport_client_width()
+    except Exception:
+        w = 0
+    reserve = 620 if ui_mode == "DEMO" else 200  # room for the key hints next to the status
+    limit = max(40, int((w - reserve) / 7.5)) if w > 0 else 400
+    dpg.set_value("status_text", text if len(text) <= limit else text[: limit - 3].rstrip() + "...")
 
 
 def format_collected_data(collected_data):
@@ -576,7 +658,8 @@ def add_class(cls):
         dpg.add_text("0", tag=f"cls_{cls}")
         with dpg.group(horizontal=True):
             dpg.add_button(label="Select", callback=select_class_button, user_data=cls)
-            dpg.add_button(label="Clear", callback=clear_class_button, user_data=cls)
+            clear = dpg.add_button(label="Clear", callback=clear_class_button, user_data=cls)
+            dpg.bind_item_theme(clear, "th_ghost")
             dpg.add_button(label="Delete", tag=f"del_{cls}", callback=delete_class_button, user_data=cls)
             dpg.bind_item_theme(f"del_{cls}", "th_danger")
     dpg.set_value("class_input", "")
@@ -678,9 +761,29 @@ def set_mode(selected):
     ui_mode = selected
     for m in MODES:
         dpg.configure_item(f"page_{m}", show=(m == selected))
-        dpg.bind_item_theme(f"mode_btn_{m}", "th_seg_on" if m == selected else "th_seg_off")
+        dpg.bind_item_theme(f"mode_btn_{m}", "th_mode_on" if m == selected else "th_mode_off")
     dpg.move_item("fft_group", parent=f"spec_slot_{selected.lower()}")
-    dpg.configure_item("fft_plot", height=170 if selected == "DEMO" else -1)
+    demo = selected == "DEMO"
+    dpg.configure_item("fft_plot", height=demo_plot_height() if demo else -1)
+    if plot_full_hz is not None:
+        dpg.set_axis_limits("x_axis", 0, plot_x_max())
+    for tag in ("fft_caption", "fft_status", "raw_pred_text"):  # no diagnostics on DEMO
+        dpg.configure_item(tag, show=not demo)
+    dpg.set_value("hint_text", KEY_HINTS if demo else "F11 full screen")
+    fit_status()
+
+
+def plot_x_max():
+    return min(DEMO_X_MAX_HZ, plot_full_hz) if ui_mode == "DEMO" else plot_full_hz
+
+
+def demo_plot_height():
+    """The DEMO spectrum takes the free height under the product view (at least 160 px)."""
+    try:
+        h = dpg.get_viewport_client_height()
+    except Exception:
+        h = 0
+    return max(150, h - 740)
 
 
 def mode_button_callback(sender, app_data, user_data):
@@ -1001,13 +1104,14 @@ def frame_callback():
 
 def show_spectrum(freqs, amps):
     """Plot FFT amplitude against frequency (up to PLOT_MAX_HZ, where the objects ring)."""
-    global plot_ymax
+    global plot_ymax, plot_full_hz
     n = plot_bins.get(len(freqs))
     if n is None:
         n = max(2, min(len(freqs), int(np.searchsorted(np.asarray(freqs), PLOT_MAX_HZ)) + 1))
         plot_bins.clear()
         plot_bins[len(freqs)] = n
-        dpg.set_axis_limits("x_axis", 0, float(freqs[n - 1]))
+        plot_full_hz = float(freqs[n - 1])
+        dpg.set_axis_limits("x_axis", 0, plot_x_max())
     f = np.asarray(freqs[:n], dtype=float)
     a = np.asarray(amps[:n], dtype=float)
     dpg.set_value("fft_series", [f.tolist(), a.tolist()])
@@ -1016,11 +1120,11 @@ def show_spectrum(freqs, amps):
     plot_ymax = max(PLOT_Y_MIN, 1.15 * float(a.max()), plot_ymax * PLOT_Y_DECAY)
     dpg.set_axis_limits("y_axis", 0, plot_ymax)
     peak = int(np.argmax(a))
-    dpg.set_value("fft_status", f"Spectrum up to {f[-1] / 1000:.0f} kHz.  Peak {f[peak]:.0f} Hz, amplitude {a[peak]:.3g}")
+    dpg.set_value("fft_status", f"peak {f[peak]:.0f} Hz")
 
 
 def show_meter(level, calibrated, now):
-    """Ring-level bar: bright above the gate, grey below it; the yellow tick is the gate."""
+    """Ring-level bar: ink above the gate, grey below it; the dark tick is the gate."""
     global meter_peak, meter_t
     top = METER_TOP_DB if calibrated else 120.0  # without calibration the level is the overall level
     meter_peak = max(level, meter_peak - PEAK_FALL_DB_S * (now - meter_t))
@@ -1031,18 +1135,17 @@ def show_meter(level, calibrated, now):
 
     above = calibrated and level >= gate_db
     dpg.configure_item("meter_fill", pmax=(x(level), METER_H + 4),
-                       fill=(*C["text"], 230) if above else (*C["neutral"], 150))
+                       fill=rgba(C["text"], 230) if above else rgba(C["meter_lo"]))
     dpg.configure_item("meter_peak", p1=(x(meter_peak), 2), p2=(x(meter_peak), METER_H + 6))
     dpg.set_value("level_text", f"{level:5.1f} dB")
     if calibrated:
         set_if_changed("meter_gate", None, p1=(x(gate_db), 0), p2=(x(gate_db), METER_H + 8), show=True)
-        note = f"gate {gate_db:.1f} dB"
-        if gate_db > HIGH_GATE_DB:
-            note += "  (high: soft taps are missed, recalibrate)"
-        set_if_changed("gate_text", note, color=C["warn_text"] if gate_db > HIGH_GATE_DB else C["muted"])
+        high = gate_db > HIGH_GATE_DB
+        note = f"gate {gate_db:.1f} dB" + ("  - too high, recalibrate" if high else "")
+        set_if_changed("gate_text", note, color=C["warn_text"] if high else C["muted"])
     else:
         set_if_changed("meter_gate", None, show=False)
-        set_if_changed("gate_text", "gate not set: press Calibrate Quiet (SETUP)", color=C["warn_text"])
+        set_if_changed("gate_text", "no gate yet: press Calibrate Quiet", color=C["warn_text"])
 
 
 def show_live(shown, raw):
@@ -1050,25 +1153,25 @@ def show_live(shown, raw):
     state = ("none",) if inference is None else role_map.role_of(shown) + (shown,)
     if live_cache.get("state") != state:
         live_cache["state"] = state
-        theme = "th_hero_n"
         if inference is None:
-            big, action, color = "No model", "Train one in TRAIN, or Load Model", C["warn_text"]
+            look, big, action = "off", "No model", "Train or load one in TRAIN"
         else:
             kind, role, _ = state
             if kind == T.ROLE:
-                big, action, color = PRODUCT[role]["name"], PRODUCT[role]["request"], ROLE_COLOR[role]
-                theme = f"th_hero_{ROLE_TAG[role]}"
+                look, big, action = ROLE_TAG[role], PRODUCT[role]["name"], PRODUCT[role]["request"]
             elif kind == T.UNMAPPED:
-                big, action, color = str(shown), "a class with no bakeoff role", C["text"]
+                look, big, action = "unmapped", str(shown), "Not a bakeoff role: check SETUP"
             else:
-                big, action, color = "Not ready", str(shown or "no label"), C["warn_text"]
+                text = str(shown or "no label")
+                look, big, action = "off", "Not ready", text[:1].upper() + text[1:]
+        theme, label_color, action_color, dot_fill, dot_ring = HERO_LOOK[look]
         dpg.set_value("pred_text", big)
-        dpg.configure_item("pred_text", color=color)
+        dpg.configure_item("pred_text", color=label_color)
         dpg.set_value("hero_action", action)
-        dpg.configure_item("hero_action", color=color if state[0] != T.ROLE or state[1] != T.NEUTRAL else C["muted"])
-        dpg.configure_item("hero_dot", fill=(*color, 255), color=(*color, 255))
+        dpg.configure_item("hero_action", color=action_color)
+        dpg.configure_item("hero_dot", fill=rgba(dot_fill), color=rgba(dot_ring))
         dpg.bind_item_theme("hero", theme)
-    raw_text = f"this frame: {raw}" if raw is not None else ""
+    raw_text = f"raw: {raw}" if raw is not None else ""
     if live_cache.get("raw") != raw_text:
         live_cache["raw"] = raw_text
         dpg.set_value("raw_pred_text", raw_text)
@@ -1090,9 +1193,32 @@ def product_event(shown, now):
         dpg.set_value("request_text", f"{PRODUCT[role]['request']} - {time.strftime('%H:%M')}")
         dpg.configure_item("request_text", color=ROLE_COLOR[role])
         for r in (T.I1, T.I2):
-            theme_if_changed(f"tile_{ROLE_TAG[r]}", f"th_tile_{ROLE_TAG[r]}" + ("_flash" if r == role else ""))
+            set_tile_look(r, r == role)
         refresh_product()
     last_role = role
+
+
+def set_tile_look(role, flash):
+    """Idle: tinted tile with the role's ink. Request (3 s): solid fill, all texts in the on-fill color."""
+    key = ROLE_TAG[role]
+    tile_flash[key] = flash
+    theme_if_changed(f"tile_{key}", f"th_tile_{key}" + ("_flash" if flash else ""))
+    set_if_changed(f"icon_{key}_idle", None, show=not flash)
+    set_if_changed(f"icon_{key}_on", None, show=flash)
+    on = C[f"{key}_on"]
+    for tag, idle in ((f"tile_{key}_how", C["muted"]), (f"tile_{key}_request", C[key]),
+                      (f"count_{key}", C["text"]), (f"tile_{key}_counter", C["muted"])):
+        set_if_changed(tag, None, color=on if flash else idle)
+
+
+def end_request():
+    """Back to the idle product view (after REQUEST_SHOW_S, or on Reset)."""
+    global request_until
+    request_until = 0.0
+    dpg.set_value("request_text", PRODUCT["idle"])
+    dpg.configure_item("request_text", color=C["muted"])
+    for r in (T.I1, T.I2):
+        set_tile_look(r, False)
 
 
 def refresh_product():
@@ -1100,17 +1226,16 @@ def refresh_product():
         dpg.set_value(f"count_{ROLE_TAG[r]}", str(counts[r]))
     for k in range(LOG_ROWS):
         t, r = history[k] if k < len(history) else ("", None)
-        dpg.set_value(f"log_t_{k}", t)
+        dpg.set_value(f"log_t_{k}", t or ("No requests yet" if k == 0 and not history else ""))
         dpg.set_value(f"log_l_{k}", PRODUCT[r]["name"] if r else "")
         dpg.set_value(f"log_a_{k}", PRODUCT[r]["request"] if r else "")
         dpg.configure_item(f"log_l_{k}", color=ROLE_COLOR.get(r, C["text"]))
 
 
 def reset_counts_callback():
-    global request_until
     counts[T.I1] = counts[T.I2] = 0
     history.clear()
-    request_until = 0.0
+    end_request()
     refresh_product()
 
 
@@ -1180,8 +1305,17 @@ def handle_trial_event(ev):
         refresh_trial_panel()
 
 
+_banner_last = 0.0
+
+
 def banner_callback():
-    trial_press(time.monotonic(), key=False)
+    """A click on the banner works like SPACE (a double click acts once)."""
+    global _banner_last
+    now = time.monotonic()
+    if now - _banner_last < 0.4:
+        return
+    _banner_last = now
+    trial_press(now, key=False)
 
 
 def override_callback():
@@ -1202,14 +1336,15 @@ def open_modal(tag, width, height):
 
 def void_callback():
     tal = session.tally
-    if session.state == T.RECORDING or tal is None or not tal.trials or tal.trials[-1].voided:
+    if session.state == T.RECORDING:
+        show_status("Stop the trial first, then void it.")
+        return
+    if tal is None or not tal.trials or tal.trials[-1].voided:
         show_status("Nothing to void: only the most recent trial of this participant can be voided, once.")
         return
     last = tal.trials[-1]
-    dpg.set_value("void_text", f"Void trial #{last.trial_no} ({type_label(last.trial_type)}, {last.verdict})? "
-                               "Only for an experimenter mistake, such as the wrong type selected or SPACE pressed "
-                               "too early. It stays in the log marked void, and its slot opens again.")
-    open_modal("void_dialog", 560, 230)
+    dpg.set_value("void_title", f"Void trial #{last.trial_no} ({type_label(last.trial_type)}, {last.verdict})?")
+    open_modal("void_dialog", 560, 312)
 
 
 def void_confirmed_callback():
@@ -1227,10 +1362,11 @@ def next_participant_callback():
     pid = dpg.get_value("next_pid_input").strip()
     old = session.tally
     if pid and old is not None and old.real_started and not old.complete:
-        dpg.set_value("confirm_next_text", f"{old.participant} has {old.n_counted_total} of "
-                                           f"{T.TRIALS_PER_PARTICIPANT} counted trials. Start {pid} anyway? The "
-                                           "unfinished block stays in the log.")
-        open_modal("confirm_next", 560, 190)
+        dpg.set_value("confirm_title", f"Start {pid} anyway?")
+        dpg.set_value("confirm_next_text", f"{old.participant} has only {old.n_counted_total} of "
+                                           f"{T.TRIALS_PER_PARTICIPANT} counted trials. Their trials stay in the "
+                                           "log; copy their numbers first if you need them.")
+        open_modal("confirm_next", 560, 226)
         return
     start_participant(pid, force=False)
 
@@ -1274,10 +1410,11 @@ def refresh_trial_panel():
         dpg.set_value("participant_text", f"Participant {tal.participant}")
         extra = []
         if tal.invalid_count:
-            extra.append(f"{tal.invalid_count} invalid (re-run)")
+            extra.append(f"{tal.invalid_count} invalid, re-run")
         if tal.voided_count:
             extra.append(f"{tal.voided_count} voided")
-        done = "COMPLETE" if tal.complete else f"{tal.n_counted_total}/{T.TRIALS_PER_PARTICIPANT} counted"
+        done = (f"All {T.TRIALS_PER_PARTICIPANT} done" if tal.complete
+                else f"{tal.n_counted_total} of {T.TRIALS_PER_PARTICIPANT} counted")
         dpg.set_value("trial_progress_text", "   ".join([done] + extra))
     selected = session.selected_type
     for t, key in TYPE_KEY.items():
@@ -1285,7 +1422,7 @@ def refresh_trial_panel():
         if t in T.PRACTICE_TYPES:
             name = "Neutral" if t == T.PRACTICE_NEUTRAL else role_name(T.I1 if t == T.PRACTICE_I1 else T.I2)
             done = tal is not None and tal.practice_done(t)
-            label = name + ("  done" if done else "")
+            label = name + (" (done)" if done else "")
             enabled = tal is not None and not tal.real_started and not done
         else:
             n = tal.n_counted(t) if tal else 0
@@ -1298,48 +1435,76 @@ def refresh_trial_panel():
         dpg.set_value(f"tally_{rk}_1", str(a))
         dpg.set_value(f"tally_{rk}_2", str(b))
         dpg.set_value(f"tally_{rk}_acc", f"{acc:.1f}")
+    complete = bool(tal is not None and tal.complete)
     for t, (r, c) in TALLY_CELL.items():
-        if t == selected:
-            dpg.highlight_table_cell("tally_table", r, c, (*C["accent_fill"], 90))
+        if t == selected and not complete:
+            dpg.highlight_table_cell("tally_table", r, c, rgba(C["i1_flash" if c == 1 else "i2_flash"]))
         else:
             dpg.unhighlight_table_cell("tally_table", r, c)
     if tal is not None:
         total = sum(tal.successes(c) for c in T.REAL_TYPES)
-        dpg.set_value("tally_overall", f"Overall {total}/{T.TRIALS_PER_PARTICIPANT}")
-    dpg.set_value("trial_say", SAY.get(selected, ""))
+        dpg.set_value("tally_overall", f"Passed {total} of {tal.n_counted_total}" if tal.n_counted_total else "")
+    dpg.set_value("trial_say", "" if complete else SAY.get(selected, ""))
+    dpg.set_value("say_caption", "ALL 20 DONE - COPY NUMBERS, THEN NEXT PARTICIPANT" if complete
+                  else SAY_NOTE.get(selected, ""))
+    fit_say_card()
     res = session.last_result
     if res is not None:
-        text = f"Last: #{res.trial_no} {type_label(res.trial_type)}   set {res.set_text}   {res.verdict}"
+        word = VERDICT_LOOK.get(res.verdict, (res.verdict, ""))[0]
         notes = []
         if res.reason and res.verdict != T.SET_ONLY:
-            notes.append(res.reason)
+            notes.append(ui_words(res.reason))
         if res.practice:
             notes.append("practice, not counted")
         elif not res.counted:
             notes.append("not counted")
         if res.voided:
             notes.append("VOIDED: " + res.void_reason)
-        dpg.set_value("trial_result", text + (f"   ({'; '.join(notes)})" if notes else "") + f"   {res.duration_s:.1f} s")
+        dpg.set_value("trial_result", f"Last: #{res.trial_no} {type_label(res.trial_type)} - {word} "
+                                      f"{ui_set(res.labels)}" + "".join(f" - {n}" for n in notes))
     else:
         dpg.set_value("trial_result", "")
-    problems = role_map.problems()
-    if inference is None:
-        roles = "No model yet: train or load one."
-    elif problems:
-        roles = "Fix the roles in SETUP: " + "; ".join(problems)
-    else:
-        roles = (f"Interaction#1 = {role_name(T.I1)} (class '{role_map.i1}')    "
-                 f"Interaction#2 = {role_name(T.I2)} (class '{role_map.i2}')    Neutral = class '{role_map.neutral}'")
-    dpg.set_value("roles_text", roles)
-    dpg.configure_item("roles_text", color=C["bad_text"] if inference is not None and problems else C["muted"])
+    set_if_changed("void_btn", None, enabled=bool(tal is not None and tal.trials and not tal.trials[-1].voided
+                                                  and session.state != T.RECORDING))
+    refresh_problems()
+
+
+def fit_say_card():
+    """One-line quotes get a short box, wrapped ones a taller box (keeps the tally on screen)."""
+    text = dpg.get_value("trial_say") or ""
+    lines = 2
+    try:
+        inner = dpg.get_item_rect_size("trial_panel")[0] - 2 * 18 - 2 * 18 - 14
+        width = dpg.get_text_size(text, font=FONTS.get("h2") or 0)[0] if text else 0
+        if inner > 100:
+            lines = 1 if width <= inner else 2 if width <= 1.9 * inner else 3
+    except Exception:
+        pass
+    set_if_changed("say_card", None, height=SAY_H + 28 * (lines - 2))
+
+
+def refresh_problems():
+    """Red lines under the trial hint, shown only when something is wrong (a healthy setup shows nothing)."""
+    if session is None or not dpg.does_item_exist("roles_text"):
+        return
+    lines = []
+    if inference is not None:
+        problems = role_map.problems()
+        if problems:
+            lines.append("Roles: fix in SETUP - " + "; ".join(problems))
+        elif (role_map.i1, role_map.i2) != ("bottle", "bowl"):
+            lines.append(f"Check roles: Bottle = class '{role_map.i1}', Bowl = class '{role_map.i2}'")
+    smooth, margin = metadata["smooth_frames"], metadata["min_margin"]
+    if smooth != 5 or abs(margin - 0.5) > 1e-9:
+        lines.append(f"Recognition is {smooth} frames / {margin:.2f}: the tested values are 5 / 0.50 (SETUP)")
+    set_if_changed("roles_text", "\n".join(lines), show=bool(lines))
     log = session.log
     if log is not None and log.last_error:
-        dpg.set_value("trial_log_text", f"Log problem: {log.last_error} ({len(log.pending)} rows waiting; trials go on)")
-        dpg.configure_item("trial_log_text", color=C["bad_text"])
-    elif log is not None:
-        where = log.path.as_posix() if log.path.exists() else f"{log.path.as_posix()} (created at the first trial)"
-        dpg.set_value("trial_log_text", f"Every trial is logged to {where}")
-        dpg.configure_item("trial_log_text", color=C["muted"])
+        set_if_changed("trial_log_text", f"LOG NOT SAVING: {log.last_error}. {len(log.pending)} rows waiting; "
+                                         "trials go on.", show=True)
+    else:
+        set_if_changed("trial_log_text", "", show=False)
+    set_if_changed("trial_log_path", f"Log: {log.path.as_posix()}" if log is not None else "")
 
 
 BLOCK_TITLES = {
@@ -1350,12 +1515,17 @@ BLOCK_TITLES = {
 KEEP_RESULT_FOR = ("not_neutral", "complete", "cell_full", "practice")  # blocks that leave the result on the banner
 
 
+def ui_words(text):
+    """trial.py text with screen names: 'Interaction#1 never shown' -> 'Bottle never shown'."""
+    return type_label(str(text).replace("Interaction#", "I"))
+
+
 def block_text(block):
-    return block[1].replace("APP ERROR: ", "").replace("NO AUDIO: ", "")
+    return ui_words(block[1].replace("APP ERROR: ", "").replace("NO AUDIO: ", ""))
 
 
 VERDICT_LOOK = {T.PASS: ("PASS", "th_banner_ok"), T.FAIL: ("FAIL", "th_banner_bad"),
-                T.INVALID: ("INVALID", "th_banner_wait"), T.SET_ONLY: ("SET", "th_banner_info")}
+                T.INVALID: ("INVALID", "th_banner_wait"), T.SET_ONLY: ("DONE", "th_banner_info")}
 
 
 def show_banner(now):
@@ -1365,7 +1535,7 @@ def show_banner(now):
     override = False
     if st["state"] == T.RECORDING:
         label, theme = f"RECORDING  {st['elapsed_s']:.1f} s", "th_banner_rec"
-        hint = "The participant acts now. Press SPACE when they are done (Esc cancels; it is not counted)."
+        hint = "Participant acts now. After a tap, wait half a second, then SPACE. Esc cancels (not counted)."
     elif inference is None:
         label, theme, hint = "NO MODEL", "th_banner_wait", "Train a model in TRAIN, or Load Model."
     elif result_fresh and session.last_result is not None and (block is None or block[0] in KEEP_RESULT_FOR):
@@ -1373,7 +1543,7 @@ def show_banner(now):
         res = session.last_result
         word, theme = VERDICT_LOOK.get(res.verdict, (res.verdict, "th_banner_wait"))
         label = f"{word}  {ui_set(res.labels)}"
-        nxt = f"Next: {type_label(session.selected_type)}. "
+        nxt = "" if block is not None and block[0] == "complete" else f"Next: {type_label(session.selected_type)}. "
         hint = nxt + ("Read the line below aloud, then press SPACE." if block is None else block_text(block))
         override = st["can_override"]
     elif block is not None:
@@ -1382,7 +1552,9 @@ def show_banner(now):
         override = st["can_override"]
     else:
         label, theme = f"READY  {type_label(session.selected_type)}", "th_banner_ready"
-        hint = "Read the line below aloud, then press SPACE (or click here) to start."
+        hint = "Read the line below aloud, then press SPACE."
+    if keyboard_busy():
+        hint = "A text box has the keyboard: press Enter or click elsewhere, then SPACE."
     set_if_changed("trial_banner", None, label=label)
     theme_if_changed("trial_banner", theme)
     set_if_changed("trial_hint", hint)
@@ -1397,28 +1569,26 @@ next_slow_tick = 0.0
 def ui_tick(now):
     global request_until, next_slow_tick
     if request_until and now > request_until:
-        request_until = 0.0
-        dpg.set_value("request_text", PRODUCT[T.NEUTRAL]["request"])
-        dpg.configure_item("request_text", color=C["muted"])
-        for r in (T.I1, T.I2):
-            theme_if_changed(f"tile_{ROLE_TAG[r]}", f"th_tile_{ROLE_TAG[r]}")
+        end_request()
     if session is not None:
         show_banner(now)
     if now >= next_slow_tick:
         next_slow_tick = now + 0.5
         refresh_chips()
         refresh_checklist()
+        refresh_problems()
+        fit_say_card()
 
 
 def refresh_chips():
-    mic = metadata["default_device"] or default_device or "no microphone"
-    set_if_changed("mic_chip", f"MIC  {mic[:34]}")
+    """Top-bar chips show problems only; empty means everything is fine."""
+    set_if_changed("mic_chip", "" if ear is not None else "No microphone")
     if inference is None:
-        set_if_changed("model_chip", "NO MODEL", color=C["warn_text"])
+        set_if_changed("model_chip", "No model loaded")
     elif role_map.problems():
-        set_if_changed("model_chip", "MODEL: set roles in SETUP", color=C["bad_text"])
+        set_if_changed("model_chip", "Set roles in SETUP")
     else:
-        set_if_changed("model_chip", "MODEL  " + " / ".join(infer_classes), color=C["muted"])
+        set_if_changed("model_chip", "")
 
 
 def refresh_checklist():
@@ -1426,19 +1596,25 @@ def refresh_checklist():
         return "[x]" if ok else "[  ]"
 
     smooth, margin = metadata["smooth_frames"], metadata["min_margin"]
+    gate_ok = gate_db is not None and gate_db <= HIGH_GATE_DB
+    if gate_db is None:
+        gate_line = "No gate yet: press Calibrate Quiet"
+    elif gate_db > HIGH_GATE_DB:
+        gate_line = f"Gate {gate_db:.1f} dB is too high (aim for 11-13): press Calibrate Quiet with the room quiet"
+    else:
+        gate_line = f"Gate {gate_db:.1f} dB"
+    roles_ok = inference is not None and not role_map.problems()
+    rec_ok = smooth == 5 and abs(margin - 0.5) < 1e-9
     lines = [
         f"{box(ear is not None)} Microphone: {metadata['default_device'] or default_device or 'none found'}",
-        f"{box(gate_db is not None)} Quiet calibration: "
-        + (f"gate {gate_db:.1f} dB" if gate_db is not None else "press Calibrate Quiet"),
-        f"{box(inference is not None)} Model: " + (", ".join(infer_classes) if inference else "train or load one"),
-        f"{box(inference is not None and not role_map.problems())} Roles: "
-        + (f"{role_map.i1} = Interaction#1, {role_map.i2} = Interaction#2" if inference and not role_map.problems()
-           else "need a model with a bottle and a bowl class"),
-        f"{box(smooth == 5 and abs(margin - 0.5) < 1e-9)} Frames to switch {smooth}, sureness {margin:.2f}"
-        " (we tested 5 and 0.50)",
+        f"{box(gate_ok)} {gate_line}",
+        f"{box(inference is not None)} Model: "
+        + (", ".join(infer_classes) if inference else "none yet (TRAIN, or Load Model)"),
+        f"{box(roles_ok)} Roles: " + (f"Bottle = class '{role_map.i1}', Bowl = class '{role_map.i2}'" if roles_ok
+                                     else "the model needs a bottle class and a bowl class"),
+        f"{box(rec_ok)} Frames to switch {smooth}, sureness {margin:.2f}"
+        + ("" if rec_ok else ": set 5 and 0.50 (type, then Enter)"),
     ]
-    if gate_db is not None and gate_db > HIGH_GATE_DB:
-        lines.append(f"Gate {gate_db:.1f} dB is high: soft taps are missed. Recalibrate (about 11-13 dB).")
     set_if_changed("setup_checklist", "\n".join(lines))
 
 
@@ -1455,19 +1631,25 @@ def poll_layout():
     w = size[0]
     panel_w = max(420, int(w * 0.36))
     dpg.configure_item("product_panel", width=panel_w)
-    tile_w = (panel_w - 3 * 10 - 6) // 2
+    tile_w = (panel_w - 2 * 18 - 12 - 2) // 2
     for key in ("i1", "i2"):
         dpg.configure_item(f"tile_{key}", width=tile_w)
-    dpg.configure_item("status_text", wrap=max(300, w - 760))
+        draw_tile_icon(key, max(120, tile_w - 32))
+    fit_status()
+    if ui_mode == "DEMO":
+        dpg.configure_item("fft_plot", height=demo_plot_height())
+    fit_say_card()
 
 
 # ——— Look: fonts, themes, icons ———
 
 
 def load_fonts():
-    # ImGui maps the size to ascent minus descent, so Segoe UI "20" looks like 15 px text (Windows 11 pt)
-    spec = {"body": ("segoeui.ttf", 20), "bold": ("segoeuib.ttf", 20), "h2": ("segoeuib.ttf", 28),
-            "banner": ("segoeuib.ttf", 44), "huge": ("segoeuib.ttf", 72)}
+    # ImGui maps the size to ascent minus descent, so Segoe UI "20" looks like 15 px text (Windows 11 pt).
+    # One family in two weights (Regular, Semibold); the projector variant draws the big label in Bold.
+    spec = {"body": ("segoeui.ttf", 20), "bold": ("seguisb.ttf", 20), "caption": ("seguisb.ttf", 17),
+            "h2": ("seguisb.ttf", 28), "banner": ("seguisb.ttf", 48),
+            "huge": ("segoeuib.ttf" if PROJECTOR else "seguisb.ttf", 84)}
     with dpg.font_registry():
         for name, (fname, size) in spec.items():
             path = FONT_DIR / fname
@@ -1488,114 +1670,206 @@ def mix(a, b, t):
     return tuple(int(round(x + (y - x) * t)) for x, y in zip(a, b))
 
 
-def rgba(c, a=255):
+def rgba(c, a=None):
+    """(r, g, b[, a]) -> (r, g, b, a). A 4th value in c is kept unless a is given."""
+    if a is None:
+        a = c[3] if len(c) > 3 else 255
     return (*c[:3], a)
 
 
-def button_theme(tag, base, text=(255, 255, 255), hover=None, active=None):
-    with dpg.theme(tag=tag):
-        with dpg.theme_component(dpg.mvButton):
-            dpg.add_theme_color(dpg.mvThemeCol_Button, rgba(base), category=dpg.mvThemeCat_Core)
-            dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, rgba(hover or mix(base, (255, 255, 255), 0.12)),
-                                category=dpg.mvThemeCat_Core)
-            dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, rgba(active or mix(base, (255, 255, 255), 0.22)),
-                                category=dpg.mvThemeCat_Core)
-            dpg.add_theme_color(dpg.mvThemeCol_Text, rgba(text), category=dpg.mvThemeCat_Core)
-        with dpg.theme_component(dpg.mvButton, enabled_state=False):  # disabled buttons need their own look
-            dim = rgba(mix(C["card"], base, 0.25))
-            dpg.add_theme_color(dpg.mvThemeCol_Button, dim, category=dpg.mvThemeCat_Core)
-            dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, dim, category=dpg.mvThemeCat_Core)
-            dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, dim, category=dpg.mvThemeCat_Core)
-            dpg.add_theme_color(dpg.mvThemeCol_Text, rgba(C["muted"]), category=dpg.mvThemeCat_Core)
+@contextmanager
+def nudge(dy):
+    """A vertical group whose text starts exactly dy px lower (no item spacing or text padding inside).
+    Items in a horizontal group are top-aligned, so this lines up text of different sizes. Next to a button
+    or a padded text, whose text starts 8 px down (FramePadding.y), dy = 8 + 0.811 * (their size - this size)."""
+    with dpg.group() as g:
+        dpg.add_spacer(height=dy)
+        yield g
+    dpg.bind_item_theme(g, "th_tight")
 
 
-def child_theme(tag, bg, border=None):
+def button_theme(tag, base, text, hover=None, active=None, border=None, border_size=0,
+                 rounding=None, align=None, padding=None, disabled=None):
+    """Per-item button look. `text` is required: on a light theme the label color must be explicit."""
+    core = dpg.mvThemeCat_Core
+    off_fill, off_text = disabled or (C["disabled"], C["faint"])
+    looks = ((True, base, hover or base, active or hover or base, text, border or base, border_size),
+             (False, off_fill, off_fill, off_fill, off_text, off_fill, 0))
     with dpg.theme(tag=tag):
-        with dpg.theme_component(dpg.mvChildWindow):
-            dpg.add_theme_color(dpg.mvThemeCol_ChildBg, rgba(bg), category=dpg.mvThemeCat_Core)
-            dpg.add_theme_color(dpg.mvThemeCol_Border, rgba(border or C["border"]), category=dpg.mvThemeCat_Core)
+        for enabled, fill, hov, act, txt, line, size in looks:
+            with dpg.theme_component(dpg.mvButton, enabled_state=enabled):
+                dpg.add_theme_color(dpg.mvThemeCol_Button, rgba(fill), category=core)
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, rgba(hov), category=core)
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, rgba(act), category=core)
+                dpg.add_theme_color(dpg.mvThemeCol_Text, rgba(txt), category=core)
+                dpg.add_theme_color(dpg.mvThemeCol_Border, rgba(line), category=core)
+                dpg.add_theme_style(dpg.mvStyleVar_FrameBorderSize, size, category=core)
+                if rounding is not None:
+                    dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, rounding, category=core)
+                if align is not None:
+                    dpg.add_theme_style(dpg.mvStyleVar_ButtonTextAlign, *align, category=core)
+                if padding is not None:
+                    dpg.add_theme_style(dpg.mvStyleVar_FramePadding, *padding, category=core)
+
+
+def child_theme(tag, bg, border=None, border_size=None, text=None, padding=None, rounding=None, spacing=None,
+                text_pad=None):
+    """Container look (mvAll, so a Text color reaches the texts inside). th_flat must stay ChildBg only:
+    it is bound to mode_area and would cascade into every card. Dear PyGui pads each text item by
+    FramePadding.y above and below; text_pad=0 removes that inside text-only containers."""
+    core = dpg.mvThemeCat_Core
+    with dpg.theme(tag=tag):
+        with dpg.theme_component(dpg.mvAll):
+            dpg.add_theme_color(dpg.mvThemeCol_ChildBg, rgba(bg), category=core)
+            if border is not None:
+                dpg.add_theme_color(dpg.mvThemeCol_Border, rgba(border), category=core)
+            if border_size is not None:
+                dpg.add_theme_style(dpg.mvStyleVar_ChildBorderSize, border_size, category=core)
+            if text is not None:
+                dpg.add_theme_color(dpg.mvThemeCol_Text, rgba(text), category=core)
+            if padding is not None:
+                dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, *padding, category=core)
+            if rounding is not None:
+                dpg.add_theme_style(dpg.mvStyleVar_ChildRounding, rounding, category=core)
+            if spacing is not None:
+                dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, *spacing, category=core)
+            if text_pad is not None:
+                dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 14, text_pad, category=core)
 
 
 def build_themes():
-    core = dpg.mvThemeCat_Core
+    core, plots = dpg.mvThemeCat_Core, dpg.mvThemeCat_Plots
+    white, clear = (255, 255, 255), (0, 0, 0, 0)
     with dpg.theme(tag="th_global"):
         with dpg.theme_component(dpg.mvAll):
             for target, color in (
                 (dpg.mvThemeCol_WindowBg, C["bg"]), (dpg.mvThemeCol_ChildBg, C["card"]),
-                (dpg.mvThemeCol_PopupBg, C["card2"]), (dpg.mvThemeCol_Border, C["border"]),
+                (dpg.mvThemeCol_PopupBg, C["card"]), (dpg.mvThemeCol_Border, C["border"]),
+                (dpg.mvThemeCol_BorderShadow, clear),
                 (dpg.mvThemeCol_FrameBg, C["frame"]), (dpg.mvThemeCol_FrameBgHovered, C["frame_hi"]),
                 (dpg.mvThemeCol_FrameBgActive, C["frame_act"]), (dpg.mvThemeCol_Button, C["frame"]),
                 (dpg.mvThemeCol_ButtonHovered, C["frame_hi"]), (dpg.mvThemeCol_ButtonActive, C["frame_act"]),
-                (dpg.mvThemeCol_Text, C["text"]), (dpg.mvThemeCol_TextDisabled, C["muted"]),
-                (dpg.mvThemeCol_CheckMark, C["accent"]), (dpg.mvThemeCol_SliderGrab, C["accent"]),
-                (dpg.mvThemeCol_SliderGrabActive, C["accent"]), (dpg.mvThemeCol_Separator, C["border"]),
-                (dpg.mvThemeCol_TableHeaderBg, C["card2"]), (dpg.mvThemeCol_TableBorderStrong, C["border"]),
-                (dpg.mvThemeCol_TableBorderLight, mix(C["card"], C["border"], 0.6)),
-                (dpg.mvThemeCol_ScrollbarBg, C["card"]), (dpg.mvThemeCol_ScrollbarGrab, C["frame_hi"]),
-                (dpg.mvThemeCol_ScrollbarGrabHovered, C["frame_act"]), (dpg.mvThemeCol_ScrollbarGrabActive, C["accent"]),
-                (dpg.mvThemeCol_TitleBg, C["card2"]), (dpg.mvThemeCol_TitleBgActive, C["card2"]),
-                (dpg.mvThemeCol_MenuBarBg, C["card"]), (dpg.mvThemeCol_PlotHistogram, C["accent_fill"]),
-                (dpg.mvThemeCol_NavHighlight, C["accent"]),
+                (dpg.mvThemeCol_Text, C["text"]), (dpg.mvThemeCol_TextDisabled, C["faint"]),
+                (dpg.mvThemeCol_CheckMark, C["text"]), (dpg.mvThemeCol_SliderGrab, C["text"]),
+                (dpg.mvThemeCol_SliderGrabActive, C["text"]), (dpg.mvThemeCol_Separator, C["border"]),
+                (dpg.mvThemeCol_Header, (*C["text"], 18)), (dpg.mvThemeCol_HeaderHovered, (*C["text"], 28)),
+                (dpg.mvThemeCol_HeaderActive, (*C["text"], 40)), (dpg.mvThemeCol_TextSelectedBg, (*C["text"], 40)),
+                (dpg.mvThemeCol_TableHeaderBg, C["card"]), (dpg.mvThemeCol_TableBorderStrong, C["border"]),
+                (dpg.mvThemeCol_TableBorderLight, C["border_light"]),
+                (dpg.mvThemeCol_TableRowBg, clear), (dpg.mvThemeCol_TableRowBgAlt, clear),
+                (dpg.mvThemeCol_ScrollbarBg, clear), (dpg.mvThemeCol_ScrollbarGrab, C["scroll"]),
+                (dpg.mvThemeCol_ScrollbarGrabHovered, C["border_strong"]),
+                (dpg.mvThemeCol_ScrollbarGrabActive, C["faint"]),
+                (dpg.mvThemeCol_TitleBg, C["card"]), (dpg.mvThemeCol_TitleBgActive, C["card"]),
+                (dpg.mvThemeCol_MenuBarBg, C["card"]), (dpg.mvThemeCol_PlotHistogram, C["meter_lo"]),
+                (dpg.mvThemeCol_NavHighlight, C["text"]), (dpg.mvThemeCol_ModalWindowDimBg, (*C["text"], 110)),
             ):
                 dpg.add_theme_color(target, rgba(color), category=core)
-            dpg.add_theme_color(dpg.mvThemeCol_Header, rgba(C["accent_fill"], 110), category=core)
-            dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, rgba(C["accent_fill"], 150), category=core)
-            dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, rgba(C["accent_fill"], 200), category=core)
-            dpg.add_theme_color(dpg.mvThemeCol_TableRowBg, (0, 0, 0, 0), category=core)
-            dpg.add_theme_color(dpg.mvThemeCol_TableRowBgAlt, (255, 255, 255, 8), category=core)
-            dpg.add_theme_color(dpg.mvThemeCol_TextSelectedBg, rgba(C["accent_fill"], 120), category=core)
-            dpg.add_theme_color(dpg.mvThemeCol_ModalWindowDimBg, (0, 0, 0, 160), category=core)
             for target, x, y in (
-                (dpg.mvStyleVar_WindowPadding, 10, 10), (dpg.mvStyleVar_FramePadding, 12, 7),
-                (dpg.mvStyleVar_ItemSpacing, 10, 8), (dpg.mvStyleVar_ItemInnerSpacing, 8, 6),
-                (dpg.mvStyleVar_CellPadding, 10, 6), (dpg.mvStyleVar_ButtonTextAlign, 0.5, 0.5),
+                (dpg.mvStyleVar_WindowPadding, 18, 14), (dpg.mvStyleVar_FramePadding, 14, 8),
+                (dpg.mvStyleVar_ItemSpacing, 12, 10), (dpg.mvStyleVar_ItemInnerSpacing, 8, 6),
+                (dpg.mvStyleVar_CellPadding, 12, 9), (dpg.mvStyleVar_ButtonTextAlign, 0.5, 0.5),
             ):
                 dpg.add_theme_style(target, x, y, category=core)
             for target, v in (
-                (dpg.mvStyleVar_WindowRounding, 0), (dpg.mvStyleVar_ChildRounding, 10),
-                (dpg.mvStyleVar_FrameRounding, 7), (dpg.mvStyleVar_PopupRounding, 8),
-                (dpg.mvStyleVar_GrabRounding, 7), (dpg.mvStyleVar_ScrollbarRounding, 8),
-                (dpg.mvStyleVar_ScrollbarSize, 14), (dpg.mvStyleVar_WindowBorderSize, 0),
+                (dpg.mvStyleVar_WindowRounding, 0), (dpg.mvStyleVar_ChildRounding, 14),
+                (dpg.mvStyleVar_FrameRounding, 10), (dpg.mvStyleVar_PopupRounding, 10),
+                (dpg.mvStyleVar_GrabRounding, 10), (dpg.mvStyleVar_ScrollbarRounding, 10),
+                (dpg.mvStyleVar_ScrollbarSize, 12), (dpg.mvStyleVar_WindowBorderSize, 0),
                 (dpg.mvStyleVar_ChildBorderSize, 1), (dpg.mvStyleVar_FrameBorderSize, 0),
+                (dpg.mvStyleVar_PopupBorderSize, 1),
             ):
                 dpg.add_theme_style(target, v, category=core)
+        # a hairline only on buttons and inputs (not on plots, progress bars or drawlists)
+        for comp in (dpg.mvButton, dpg.mvInputText, dpg.mvInputFloat, dpg.mvInputInt, dpg.mvCombo):
+            with dpg.theme_component(comp):
+                dpg.add_theme_style(dpg.mvStyleVar_FrameBorderSize, 1, category=core)
         with dpg.theme_component(dpg.mvPlot):
-            plots = dpg.mvThemeCat_Plots
             dpg.add_theme_color(dpg.mvPlotCol_FrameBg, rgba(C["card"]), category=plots)
-            dpg.add_theme_color(dpg.mvPlotCol_PlotBg, rgba(C["bg"]), category=plots)
-            dpg.add_theme_color(dpg.mvPlotCol_PlotBorder, rgba(C["border"]), category=plots)
-            dpg.add_theme_color(dpg.mvPlotCol_AxisGrid, (255, 255, 255, 22), category=plots)
+            dpg.add_theme_color(dpg.mvPlotCol_PlotBg, rgba(C["card"]), category=plots)
+            dpg.add_theme_color(dpg.mvPlotCol_PlotBorder, clear, category=plots)
+            dpg.add_theme_color(dpg.mvPlotCol_AxisGrid, rgba(C["text"], 20), category=plots)
             dpg.add_theme_color(dpg.mvPlotCol_AxisText, rgba(C["muted"]), category=plots)
-            dpg.add_theme_color(dpg.mvPlotCol_LegendBg, rgba(C["card2"], 220), category=plots)
+            dpg.add_theme_color(dpg.mvPlotCol_LegendBg, rgba(C["card"]), category=plots)
+            dpg.add_theme_style(dpg.mvPlotStyleVar_PlotPadding, 8, 8, category=plots)
         with dpg.theme_component(dpg.mvLineSeries):
-            dpg.add_theme_color(dpg.mvPlotCol_Line, rgba(C["accent"]), category=dpg.mvThemeCat_Plots)
-            dpg.add_theme_style(dpg.mvPlotStyleVar_LineWeight, 1.6, category=dpg.mvThemeCat_Plots)
+            dpg.add_theme_color(dpg.mvPlotCol_Line, rgba(C["plot_line"]), category=plots)
+            dpg.add_theme_style(dpg.mvPlotStyleVar_LineWeight, 1.6, category=plots)
     dpg.bind_theme("th_global")
 
-    for key in ("i1", "i2"):
+    for key in ("i1", "i2"):  # ring-frequency lines on the spectrum
         with dpg.theme(tag=f"th_marks_{key}"):
             with dpg.theme_component(dpg.mvInfLineSeries):
-                dpg.add_theme_color(dpg.mvPlotCol_Line, rgba(C[key], 150), category=dpg.mvThemeCat_Plots)
-                dpg.add_theme_style(dpg.mvPlotStyleVar_LineWeight, 1.0, category=dpg.mvThemeCat_Plots)
+                dpg.add_theme_color(dpg.mvPlotCol_Line, rgba(C[f"{key}_icon"], 230), category=plots)
+                dpg.add_theme_style(dpg.mvPlotStyleVar_LineWeight, 2.0, category=plots)
 
-    button_theme("th_seg_on", C["accent_fill"])
-    button_theme("th_seg_off", C["frame"], text=C["muted"])
-    button_theme("th_primary", C["accent_fill"])
-    button_theme("th_danger", (127, 29, 29))
-    button_theme("th_record_idle", (127, 29, 29))
-    button_theme("th_record_on", C["rec"])
-    for name in ("ready", "rec", "ok", "bad", "wait", "info"):  # trial banner: hover = base, so it never flickers
-        button_theme(f"th_banner_{name}", C[name], hover=C[name], active=mix(C[name], (0, 0, 0), 0.15))
-    child_theme("th_bar", C["card"], C["card"])
-    child_theme("th_flat", C["bg"], C["bg"])
-    for role, key in ROLE_TAG.items():
-        child_theme(f"th_hero_{key}", mix(C["card"], ROLE_COLOR[role], 0.10), mix(C["border"], ROLE_COLOR[role], 0.6))
+    # buttons: ink is the only chrome color
+    ink = dict(hover=C["accent_hi"], active=C["accent_act"])
+    button_theme("th_primary", C["accent_fill"], white, **ink)
+    button_theme("th_seg_on", C["accent_fill"], white, **ink)  # selected trial type
+    button_theme("th_seg_off", C["frame"], C["text"], hover=C["frame_hi"], active=C["frame_act"],
+                 border=C["border"], border_size=1)
+    button_theme("th_mode_on", C["card"], C["text"], border=C["border"], border_size=1, rounding=9,
+                 padding=(14, 6))
+    button_theme("th_mode_off", clear, C["muted"], hover=(255, 255, 255, 150), active=(255, 255, 255, 220),
+                 rounding=9, padding=(14, 6))
+    button_theme("th_ghost", clear, C["muted"], hover=C["frame"], active=C["frame_hi"])
+    pale_red = dict(hover=C["bad_hover"], active=C["bad_active"], border=C["bad_hair"], border_size=1)
+    button_theme("th_danger", C["bad"], C["bad_text"], **pale_red)
+    button_theme("th_record_idle", C["bad"], C["bad_text"], **pale_red)
+    button_theme("th_danger_solid", C["rec"], white, hover=C["rec_hover"], active=C["bad_text"])
+    button_theme("th_record_on", C["rec"], white, hover=C["rec_hover"], active=C["bad_text"])
+    button_theme("th_label", clear, C["muted"], align=(0.0, 0.5), padding=(0, 10),
+                 disabled=(clear, C["muted"]))  # row labels in the trial-type rows (disabled buttons)
+
+    # trial banner: hover = base so it never flickers; only RECORDING is a solid fill
+    banner = {  # fill, text, outline, outline px
+        "ready": (C["ready"], C["text"], C["text"], 2),
+        "rec": (C["rec"], white, C["rec"], 0),
+        "ok": (C["ok"], C["ok_text"], C["ok_line"], 3),
+        "bad": (C["bad"], C["bad_text"], C["bad_line"], 3),
+        "wait": (C["wait"], C["muted"], C["border_strong"], 2),
+        "info": (C["info"], C["text"], C["border_strong"], 2),
+    }
+    for name, (fill, text, line, size) in banner.items():
+        button_theme(f"th_banner_{name}", fill, text, hover=fill, active=mix(fill, (0, 0, 0), 0.04),
+                     border=line, border_size=size, rounding=14)
+
+    # containers
+    child_theme("th_flat", C["bg"])  # mode_area: ChildBg only
+    child_theme("th_topbar", C["bg"], C["bg"], border_size=0, padding=(18, 6))
+    child_theme("th_footer", C["bg"], C["bg"], border_size=0, padding=(18, 6), text_pad=0)
+    child_theme("th_card", C["card"], C["border"], border_size=1, padding=(18, 14))
+    child_theme("th_card_text", C["card"], C["border"], border_size=1, padding=(18, 14), text_pad=0)
+    child_theme("th_card_trial", C["card"], C["border"], border_size=1, padding=(18, 14), spacing=(12, 8))
+    child_theme("th_switch", C["frame"], C["frame"], border_size=0, padding=(4, 4), rounding=12, spacing=(4, 0))
+    child_theme("th_say", C["card2"], C["border"], border_size=1, padding=(18, 12), rounding=12, text_pad=0)
+    child_theme("th_hero_n", C["card"], C["border"], border_size=1, text=C["muted"], text_pad=0)
+    child_theme("th_hero_i1", C["i1_fill"], C["i1_icon"], border_size=2, text=C["i1_on"], text_pad=0)
+    child_theme("th_hero_i2", C["i2_fill"], C["i2_icon"], border_size=2, text=C["i2_on"], text_pad=0)
+    child_theme("th_hero_off", C["stone"], C["border"], border_size=1, text=C["muted"], text_pad=0)
     for key in ("i1", "i2"):
-        child_theme(f"th_tile_{key}", mix(C["card"], C[key], 0.08), mix(C["border"], C[key], 0.35))
-        child_theme(f"th_tile_{key}_flash", mix(C["card"], C[key], 0.40), C[key])
+        child_theme(f"th_tile_{key}", C[f"{key}_tint"], C[f"{key}_tint_line"], border_size=1, padding=(16, 12),
+                    text_pad=0)
+        child_theme(f"th_tile_{key}_flash", C[f"{key}_fill"], C[f"{key}_icon"], border_size=2, padding=(16, 12),
+                    text_pad=0)
+    with dpg.theme(tag="th_tight"):  # nudge() groups: no item spacing and no text padding inside
+        with dpg.theme_component(dpg.mvAll):
+            dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 8, 0, category=core)
+            dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 14, 0, category=core)
+    with dpg.theme(tag="th_cells"):  # text-only tables: the row height comes from the cell padding alone
+        with dpg.theme_component(dpg.mvAll):
+            dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 14, 0, category=core)
+    with dpg.theme(tag="th_modal"):
+        with dpg.theme_component(dpg.mvAll):
+            dpg.add_theme_color(dpg.mvThemeCol_WindowBg, rgba(C["card"]), category=core)
+            dpg.add_theme_color(dpg.mvThemeCol_Border, rgba(C["border"]), category=core)
+            dpg.add_theme_style(dpg.mvStyleVar_WindowBorderSize, 1, category=core)
+            dpg.add_theme_style(dpg.mvStyleVar_WindowRounding, 16, category=core)
+            dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 24, 20, category=core)
 
 
-def draw_bottle(parent, w, h, col):
+def draw_bottle(parent, w, h, col, spoon=None):
     cx = w / 2
     dpg.draw_rectangle((cx - 20, h * 0.36), (cx + 20, h - 4), fill=rgba(col, 230), color=rgba(col), rounding=10,
                        parent=parent)
@@ -1607,16 +1881,30 @@ def draw_bottle(parent, w, h, col):
     ring_marks(parent, cx + 30, h * 0.62, col)
 
 
-def draw_bowl(parent, w, h, col):
+def draw_bowl(parent, w, h, col, spoon=None):
+    spoon = spoon or C["spoon"]
     cx, top, rx, ry = w / 2, h * 0.45, 48, h * 0.45
     pts = [(cx + rx * cos(pi * i / 24), top + ry * sin(pi * i / 24)) for i in range(25)]
     dpg.draw_polygon(pts + [pts[0]], fill=rgba(col, 230), color=rgba(col), parent=parent)
     dpg.draw_ellipse((cx - rx, top - 7), (cx + rx, top + 7), fill=rgba(mix(col, (0, 0, 0), 0.35)), color=rgba(col),
                      parent=parent)
-    dpg.draw_line((cx - 66, 8), (cx - 30, top - 4), color=rgba(C["text"]), thickness=4, parent=parent)  # spoon
-    dpg.draw_ellipse((cx - 36, top - 13), (cx - 20, top - 2), fill=rgba(C["text"]), color=rgba(C["text"]),
-                     parent=parent)
+    dpg.draw_line((cx - 66, 8), (cx - 30, top - 4), color=rgba(spoon), thickness=4, parent=parent)  # spoon
+    dpg.draw_ellipse((cx - 36, top - 13), (cx - 20, top - 2), fill=rgba(spoon), color=rgba(spoon), parent=parent)
     ring_marks(parent, cx + rx + 12, top + 8, col)
+
+
+def draw_tile_icon(key, w):
+    """Draw a tile's icon twice, centred in w: in its idle colour and in the on-fill colour used while the tile
+    is solid (set_tile_look shows one of the two layers)."""
+    dl = f"icon_{key}"
+    dpg.configure_item(dl, width=w)
+    dpg.delete_item(dl, children_only=True)
+    draw = draw_bottle if key == "i1" else draw_bowl
+    for layer, col, spoon in (("idle", C[f"{key}_icon"], C["spoon"]), ("on", C[f"{key}_on"], C[f"{key}_on"])):
+        tag = f"icon_{key}_{layer}"
+        ui_cache.pop(tag, None)
+        with dpg.draw_layer(tag=tag, parent=dl, show=(layer == "on") == tile_flash[key]):
+            draw(tag, w, 60, col, spoon)
 
 
 def ring_marks(parent, x, y, col):
@@ -1628,26 +1916,45 @@ def ring_marks(parent, x, y, col):
 # ——— UI Construction ———
 
 
-def section(text):
-    dpg.add_text(text.upper(), color=C["muted"])
-    dpg.add_separator()
+def section(text, gap=6):
+    """Uppercase muted caption; whitespace (no separator lines) separates sections."""
+    if gap:
+        dpg.add_spacer(height=gap)
+    t = dpg.add_text(text.upper(), color=C["muted"])
+    font(t, "caption")
 
 
 def build_ui():
     with dpg.window(tag="root", no_scrollbar=True):
-        with dpg.child_window(tag="topbar", height=TOPBAR_H, border=False, no_scrollbar=True):
+        with dpg.child_window(tag="topbar", height=TOPBAR_H, border=False, no_scrollbar=True,
+                              always_use_window_padding=True):
             with dpg.group(horizontal=True):
-                dpg.add_text(PRODUCT["name"], tag="app_title")
-                font("app_title", "h2")
-                dpg.add_spacer(width=16)
-                for m in MODES:
-                    dpg.add_button(label=m, tag=f"mode_btn_{m}", width=120, height=34, callback=mode_button_callback,
-                                   user_data=m)
-                dpg.add_spacer(width=16)
-                dpg.add_text("", tag="mic_chip", color=C["muted"])
-                dpg.add_text("", tag="model_chip", color=C["warn_text"])
-                dpg.add_text("", tag="rec_chip", color=C["rec"])
-        dpg.bind_item_theme("topbar", "th_bar")
+                with dpg.drawlist(width=36, height=40, tag="logo_dl"):
+                    dpg.draw_circle((12, 20), 9, fill=rgba(C["i1_fill"]), color=rgba(C["i1_fill"]))
+                    dpg.draw_circle((24, 20), 9, fill=rgba(C["i2_fill"], 230), color=rgba(C["i2_fill"], 230))
+                with nudge(6):
+                    dpg.add_text(PRODUCT["name"], tag="app_title")
+                    font("app_title", "h2")
+                dpg.add_spacer(width=12)
+                with dpg.child_window(tag="mode_switch", width=328, height=40, border=False, no_scrollbar=True,
+                                      always_use_window_padding=True):
+                    with dpg.group(horizontal=True):
+                        for m in MODES:
+                            dpg.add_button(label=m, tag=f"mode_btn_{m}", width=104, height=32,
+                                           callback=mode_button_callback, user_data=m)
+                            font(f"mode_btn_{m}", "bold")
+                dpg.bind_item_theme("mode_switch", "th_switch")
+                dpg.add_spacer(width=12)
+                with nudge(10):
+                    dpg.add_text(PRODUCT["tagline"], tag="topbar_tagline", color=C["muted"])
+                dpg.add_spacer(width=12)
+                with nudge(10):
+                    with dpg.group(horizontal=True):
+                        dpg.add_text("", tag="rec_chip", color=C["rec"])
+                        font("rec_chip", "bold")
+                        dpg.add_text("", tag="model_chip", color=C["bad_text"])
+                        dpg.add_text("", tag="mic_chip", color=C["bad_text"])
+        dpg.bind_item_theme("topbar", "th_topbar")
 
         build_status_band()
         with dpg.child_window(tag="mode_area", height=-FOOTER_H, border=False):
@@ -1656,20 +1963,26 @@ def build_ui():
             build_demo_page()
         dpg.bind_item_theme("mode_area", "th_flat")
 
-        with dpg.child_window(tag="footer", height=-1, border=False, no_scrollbar=True):
+        with dpg.child_window(tag="footer", height=-1, border=False, no_scrollbar=True,
+                              always_use_window_padding=True):
             with dpg.group(horizontal=True):
-                dpg.add_text("Press Calibrate Quiet first (3 s of quiet).", tag="status_text", color=C["warn_text"],
-                             wrap=600)
+                dpg.add_text("Press Calibrate Quiet first (3 s of quiet).", tag="status_text", color=C["muted"])
+                dpg.add_spacer(width=20)
                 dpg.add_text(KEY_HINTS, tag="hint_text", color=C["muted"])
-        dpg.bind_item_theme("footer", "th_flat")
+        dpg.bind_item_theme("footer", "th_footer")
 
     # One spectrum plot, moved between the screens with move_item
     with dpg.group(tag="fft_group", parent="spec_slot_setup"):
-        dpg.add_text("Waiting for microphone data...", tag="fft_status", color=C["muted"])
+        with dpg.group(horizontal=True):
+            dpg.add_text("SOUND SPECTRUM", tag="fft_caption", color=C["muted"])
+            font("fft_caption", "caption")
+            for role in (T.I1, T.I2):
+                hz = " / ".join(str(f) for f in PRODUCT[role]["ring_hz"])
+                dpg.add_text(f"{PRODUCT[role]['name']}  {hz} Hz", color=C[ROLE_TAG[role]])
+            dpg.add_text("Waiting for microphone data...", tag="fft_status", color=C["muted"])
         with dpg.plot(tag="fft_plot", height=-1, width=-1, no_menus=True, no_box_select=True, no_mouse_pos=True):
-            dpg.add_plot_legend()
             dpg.add_plot_axis(dpg.mvXAxis, tag="x_axis", label="Frequency (Hz)")
-            dpg.add_plot_axis(dpg.mvYAxis, tag="y_axis", label="Amplitude", no_tick_labels=True)
+            dpg.add_plot_axis(dpg.mvYAxis, tag="y_axis", label="", no_tick_labels=True)
             dpg.set_axis_limits("y_axis", 0, PLOT_Y_MIN)
             dpg.add_line_series([], [], label="spectrum", parent="y_axis", tag="fft_series")
             for role in (T.I1, T.I2):
@@ -1683,99 +1996,104 @@ def build_ui():
 
 def build_status_band():
     with dpg.group(horizontal=True):
-        with dpg.child_window(tag="hero", width=-(METER_W + 50), height=HERO_H, no_scrollbar=True):
+        with dpg.child_window(tag="hero", width=-(METER_W + 72), height=HERO_H, no_scrollbar=True):
             with dpg.group(horizontal=True):
-                dpg.add_text("NOW HEARING", color=C["muted"])
-                dpg.add_spacer(width=12)
-                dpg.add_text("", tag="raw_pred_text", color=C["muted"])
-            with dpg.group(horizontal=True):
-                with dpg.drawlist(width=50, height=72, tag="hero_dot_dl"):
-                    dpg.draw_circle((25, 38), 17, fill=rgba(C["neutral"]), color=rgba(C["neutral"]), tag="hero_dot")
-                dpg.add_text("No model", tag="pred_text", color=C["warn_text"])
+                with dpg.drawlist(width=52, height=84, tag="hero_dot_dl"):
+                    dpg.draw_circle((22, 46), 16, fill=rgba(C["faint"]), color=rgba(C["faint"]), thickness=3,
+                                    tag="hero_dot")
+                dpg.add_text("No model", tag="pred_text", color=C["muted"])
                 font("pred_text", "huge")
-                with dpg.group():
-                    dpg.add_spacer(height=22)
+                with nudge(19):  # the caption's cap top lines up with the label's cap top
+                    cap = dpg.add_text("NOW HEARING")  # no color: it follows the hero theme's text color
+                    font(cap, "caption")
+                    dpg.add_spacer(height=9)  # the request's baseline lines up with the label's baseline
                     dpg.add_text("", tag="hero_action", color=C["muted"])
                     font("hero_action", "h2")
-        dpg.bind_item_theme("hero", "th_hero_n")
+        dpg.bind_item_theme("hero", "th_hero_off")
         with dpg.child_window(tag="meter_card", width=-1, height=HERO_H, no_scrollbar=True):
             with dpg.group(horizontal=True):
-                dpg.add_text("RING LEVEL", color=C["muted"])
-                dpg.add_text("--", tag="level_text")
-                font("level_text", "bold")
+                with nudge(2):
+                    cap = dpg.add_text("RING LEVEL", color=C["muted"])
+                    font(cap, "caption")
+                dpg.add_text("--", tag="level_text", color=C["muted"])
+                dpg.add_spacer(width=8)
+                dpg.add_text("", tag="raw_pred_text", color=C["muted"])
             with dpg.drawlist(width=METER_W, height=METER_H + 8, tag="meter_dl"):
-                dpg.draw_rectangle((0, 4), (METER_W, METER_H + 4), fill=rgba(C["frame"]), color=rgba(C["frame"]),
-                                   rounding=6, tag="meter_bg")
-                dpg.draw_rectangle((0, 4), (1, METER_H + 4), fill=rgba(C["neutral"], 150), color=(0, 0, 0, 0),
+                dpg.draw_rectangle((0, 4), (METER_W, METER_H + 4), fill=rgba(C["border_light"]),
+                                   color=rgba(C["border_light"]), rounding=6, tag="meter_bg")
+                dpg.draw_rectangle((0, 4), (1, METER_H + 4), fill=rgba(C["meter_lo"]), color=(0, 0, 0, 0),
                                    rounding=6, tag="meter_fill")
-                dpg.draw_line((0, 2), (0, METER_H + 6), color=rgba(C["text"], 160), thickness=2, tag="meter_peak")
-                dpg.draw_line((0, 0), (0, METER_H + 8), color=rgba(C["warn_text"]), thickness=3, tag="meter_gate",
+                dpg.draw_line((0, 2), (0, METER_H + 6), color=rgba(C["faint"]), thickness=2, tag="meter_peak")
+                dpg.draw_line((0, 0), (0, METER_H + 8), color=rgba(C["text"]), thickness=3, tag="meter_gate",
                               show=False)
-            dpg.add_text("gate not set: press Calibrate Quiet (SETUP)", tag="gate_text", color=C["warn_text"])
+            dpg.add_text("no gate yet: press Calibrate Quiet", tag="gate_text", color=C["warn_text"])
+        dpg.bind_item_theme("meter_card", "th_card_text")
 
 
 def build_setup_page():
     with dpg.child_window(tag="page_SETUP", border=False, show=False):
         with dpg.group(horizontal=True):
-            with dpg.child_window(tag="setup_left", width=470, height=-1):
+            with dpg.child_window(tag="setup_left", width=480, height=-1):
+                section("Ready for the demo?", gap=0)
+                dpg.add_text("", tag="setup_checklist", wrap=0)
                 section("Microphone")
                 dpg.add_combo(items=device_list, tag="device_combo", default_value=default_device or "", width=-1,
                               callback=device_select_callback)
-                dpg.add_spacer(height=4)
                 section("Quiet-room calibration")
-                dpg.add_button(label="Calibrate Quiet  (keep the room quiet for 3 s)", tag="calib_button", width=-1,
-                               height=40, callback=calibrate_callback)
+                dpg.add_button(label="Calibrate Quiet  (3 s of quiet)", tag="calib_button", width=-1, height=44,
+                               callback=calibrate_callback)
                 dpg.bind_item_theme("calib_button", "th_primary")
                 dpg.add_progress_bar(tag="calib_progress", default_value=0.0, overlay="keep quiet...", width=-1,
                                      show=False)
                 dpg.add_input_float(tag="gate_input", label="gate dB (Enter)", default_value=0.0, step=1.0,
-                                    format="%.1f", width=150, on_enter=True, callback=gate_input_callback)
-                dpg.add_text("Louder frames than the gate can be taps; quieter frames are Neutral.", color=C["muted"],
-                             wrap=0)
-                dpg.add_spacer(height=4)
+                                    format="%.1f", width=160, on_enter=True, callback=gate_input_callback)
+                dpg.add_text("Anything below the gate is Neutral. Aim for 11-13 dB.", color=C["muted"], wrap=0)
                 section("Recognition")
                 dpg.add_input_int(tag="smooth_input", label="frames to switch", default_value=metadata["smooth_frames"],
-                                  min_value=1, max_value=10, min_clamped=True, max_clamped=True, width=150,
+                                  min_value=1, max_value=10, min_clamped=True, max_clamped=True, width=160,
                                   callback=smooth_input_callback)
                 dpg.add_input_float(tag="margin_input", label="sureness (Enter)", default_value=metadata["min_margin"],
-                                    step=0.25, min_value=0.0, min_clamped=True, format="%.2f", width=150,
+                                    step=0.25, min_value=0.0, min_clamped=True, format="%.2f", width=160,
                                     on_enter=True, callback=margin_input_callback)
-                dpg.add_spacer(height=4)
-                section("Bakeoff roles")
-                dpg.add_combo(items=[], tag="i1_combo", label=f"Interaction#1 ({PRODUCT[T.I1]['name']})", width=180,
-                              callback=role_combo_callback, user_data="i1_class")
-                dpg.add_combo(items=[], tag="i2_combo", label=f"Interaction#2 ({PRODUCT[T.I2]['name']})", width=180,
-                              callback=role_combo_callback, user_data="i2_class")
-                dpg.add_spacer(height=4)
-                section("Ready for the demo?")
-                dpg.add_text("", tag="setup_checklist", wrap=0)
+            dpg.bind_item_theme("setup_left", "th_card")
             with dpg.child_window(tag="setup_right", width=-1, height=-1):
+                section("Bakeoff roles", gap=0)
+                with dpg.group(horizontal=True):
+                    dpg.add_combo(items=[], tag="i1_combo", label=f"Interaction#1 ({PRODUCT[T.I1]['name']})",
+                                  width=200, callback=role_combo_callback, user_data="i1_class")
+                    dpg.add_spacer(width=24)
+                    dpg.add_combo(items=[], tag="i2_combo", label=f"Interaction#2 ({PRODUCT[T.I2]['name']})",
+                                  width=200, callback=role_combo_callback, user_data="i2_class")
+                dpg.add_spacer(height=4)
                 dpg.add_group(tag="spec_slot_setup")
+            dpg.bind_item_theme("setup_right", "th_card")
 
 
 def build_train_page():
     with dpg.child_window(tag="page_TRAIN", border=False, show=False):
         with dpg.group(horizontal=True):
-            with dpg.child_window(tag="train_left", width=-480, height=-1):
-                section("Classes and recorded frames")
+            with dpg.child_window(tag="train_left", width=-500, height=-1):
+                section("Classes and recorded frames", gap=0)
                 with dpg.group(horizontal=True):
                     dpg.add_input_text(tag="class_input", hint="new class name", width=-130, on_enter=True,
                                        callback=add_class_callback)
                     dpg.add_button(label="Add Class", width=-1, callback=add_class_callback)
                 with dpg.table(tag="class_table", header_row=True, policy=dpg.mvTable_SizingStretchProp,
-                               borders_innerH=True, borders_outerH=True, row_background=True, height=190,
+                               borders_innerH=True, borders_outerH=False, row_background=False, height=206,
                                scrollY=True):
                     dpg.add_table_column(label="Class", init_width_or_weight=1.4)
                     dpg.add_table_column(label="Frames", init_width_or_weight=0.8)
                     dpg.add_table_column(label="", init_width_or_weight=2.2, no_sort=True)
                 with dpg.group(horizontal=True):
-                    dpg.add_button(label="Clear All", callback=clear_all_classes)
+                    dpg.add_button(label="Clear All", tag="clear_all_btn", callback=clear_all_classes)
+                    dpg.bind_item_theme("clear_all_btn", "th_ghost")
                     dpg.add_button(label="Delete All", tag="delete_all_btn", callback=delete_all_classes)
                     dpg.bind_item_theme("delete_all_btn", "th_danger")
-                dpg.add_spacer(height=4)
+                dpg.add_spacer(height=6)
                 dpg.add_group(tag="spec_slot_train")
+            dpg.bind_item_theme("train_left", "th_card")
             with dpg.child_window(tag="train_right", width=-1, height=-1):
-                section("Record")
+                section("Record", gap=0)
                 dpg.add_text(f"Selected: {record_val}", tag="selected_class")
                 font("selected_class", "h2")
                 dpg.add_button(label="Record Data", tag="record_button", width=-1, height=56, enabled=False,
@@ -1783,7 +2101,6 @@ def build_train_page():
                 dpg.bind_item_theme("record_button", "th_record_idle")
                 font("record_button", "h2")
                 dpg.add_text("Select a class first", tag="recording_status", color=C["muted"], wrap=0)
-                dpg.add_spacer(height=8)
                 section("Model")
                 dpg.add_combo(items=MODEL_OPTIONS, default_value=metadata["model_type"], tag="model_combo", width=-1,
                               callback=model_select_callback)
@@ -1792,12 +2109,13 @@ def build_train_page():
                                    callback=train_model_callback)
                     dpg.bind_item_theme("train_button", "th_primary")
                     dpg.add_loading_indicator(tag="training_status_text", show=False, radius=2.0,
-                                              color=rgba(C["accent"]), secondary_color=rgba(C["accent_fill"]))
+                                              color=rgba(C["text"]), secondary_color=rgba(C["faint"]))
                 with dpg.group(horizontal=True):
                     dpg.add_button(label="Save Model", tag="btn_save", width=200, callback=save_model_callback)
                     dpg.add_button(label="Load Model", tag="btn_load", width=200, callback=load_model_callback)
                 dpg.add_text("No model yet. A trained model is kept and loaded again at the next start.",
                              tag="model_classes_text", color=C["muted"], wrap=0)
+            dpg.bind_item_theme("train_right", "th_card")
 
 
 def build_demo_page():
@@ -1808,33 +2126,36 @@ def build_demo_page():
 
 
 def build_product_panel():
-    with dpg.child_window(tag="product_panel", width=440, height=-1):
-        dpg.add_text(PRODUCT["name"].upper(), tag="product_title")
-        font("product_title", "h2")
-        dpg.add_text(PRODUCT["tagline"], color=C["muted"], wrap=0)
-        dpg.add_text(PRODUCT[T.NEUTRAL]["request"], tag="request_text", color=C["muted"])
+    with dpg.child_window(tag="product_panel", width=440, height=-1, no_scrollbar=True):
+        dpg.add_text(PRODUCT["name"], tag="product_title", show=False)  # the top bar names the app
+        dpg.add_text(PRODUCT["idle"], tag="request_text", color=C["muted"])
         font("request_text", "banner")
         with dpg.group(horizontal=True):
-            for role, draw in ((T.I1, draw_bottle), (T.I2, draw_bowl)):
+            for role in (T.I1, T.I2):
                 key = ROLE_TAG[role]
                 with dpg.child_window(tag=f"tile_{key}", width=200, height=TILE_H, no_scrollbar=True):
-                    with dpg.drawlist(width=170, height=60, tag=f"icon_{key}"):
-                        draw(f"icon_{key}", 170, 60, C[key])
-                    dpg.add_text(PRODUCT[role]["how"], color=C["muted"])
+                    dpg.add_drawlist(width=170, height=60, tag=f"icon_{key}")
+                    draw_tile_icon(key, 170)
+                    dpg.add_text(PRODUCT[role]["how"], tag=f"tile_{key}_how", color=C["muted"])
+                    font(f"tile_{key}_how", "caption")
                     dpg.add_text(PRODUCT[role]["request"], tag=f"tile_{key}_request", color=C[key])
                     font(f"tile_{key}_request", "h2")
                     with dpg.group(horizontal=True):
-                        dpg.add_text("0", tag=f"count_{key}")
+                        dpg.add_text("0", tag=f"count_{key}", color=C["text"])
                         font(f"count_{key}", "h2")
-                        with dpg.group():
-                            dpg.add_spacer(height=4)
-                            dpg.add_text(PRODUCT[role]["counter"], color=C["muted"])
+                        with nudge(7):
+                            dpg.add_text(PRODUCT[role]["counter"], tag=f"tile_{key}_counter", color=C["muted"])
                 dpg.bind_item_theme(f"tile_{key}", f"th_tile_{key}")
+        dpg.add_group(tag="spec_slot_demo")
         dpg.add_text(PRODUCT["hint"], color=C["muted"], wrap=0)
+        dpg.add_spacer(height=4)
         with dpg.group(horizontal=True):
-            dpg.add_text("RECENT REQUESTS", color=C["muted"])
+            with nudge(2):
+                cap = dpg.add_text("RECENT", color=C["muted"])
+                font(cap, "caption")
             dpg.add_button(label="Reset", tag="reset_counts_btn", small=True, callback=reset_counts_callback)
-        with dpg.table(tag="log_table", header_row=False, policy=dpg.mvTable_SizingStretchProp, borders_innerH=True):
+            dpg.bind_item_theme("reset_counts_btn", "th_ghost")
+        with dpg.table(tag="log_table", header_row=False, policy=dpg.mvTable_SizingStretchProp):
             dpg.add_table_column(init_width_or_weight=0.8)
             dpg.add_table_column(init_width_or_weight=0.7)
             dpg.add_table_column(init_width_or_weight=1.3)
@@ -1843,85 +2164,124 @@ def build_product_panel():
                     dpg.add_text("", tag=f"log_t_{k}", color=C["muted"])
                     dpg.add_text("", tag=f"log_l_{k}")
                     dpg.add_text("", tag=f"log_a_{k}", color=C["muted"])
-        dpg.add_spacer(height=4)
-        dpg.add_group(tag="spec_slot_demo")
+        dpg.bind_item_theme("log_table", "th_cells")
+    dpg.bind_item_theme("product_panel", "th_card_text")
+
+
+def type_label_button(text):
+    """Fixed-width row label (a disabled, transparent button) so the trial-type rows line up."""
+    b = dpg.add_button(label=text.upper(), width=80, enabled=False)
+    dpg.bind_item_theme(b, "th_label")
+    font(b, "caption")
 
 
 def build_trial_panel():
+    # Order = the experimenter's loop: who, banner, hint, problems, what to say, last result; then the
+    # per-participant parts (trial types, tally, Copy numbers, Next participant).
     with dpg.child_window(tag="trial_panel", width=-1, height=-1):
         with dpg.group(horizontal=True):
-            dpg.add_text("BAKEOFF TRIAL", tag="trial_title")
-            font("trial_title", "h2")
+            with nudge(17):
+                dpg.add_text("BAKEOFF TRIAL", tag="trial_title", color=C["muted"])
+                font("trial_title", "caption")
             dpg.add_text("", tag="participant_text")
-            font("participant_text", "bold")
-            dpg.add_text("", tag="trial_progress_text", color=C["muted"])
+            font("participant_text", "h2")
+            with nudge(14):
+                dpg.add_text("", tag="trial_progress_text", color=C["muted"])
+        dpg.add_button(label="", tag="trial_banner", width=-1, height=84, callback=banner_callback)
+        font("trial_banner", "banner")
+        dpg.bind_item_theme("trial_banner", "th_banner_wait")
         with dpg.group(horizontal=True):
-            dpg.add_text("Practice ", color=C["muted"])
+            with nudge(8):
+                dpg.add_text("", tag="trial_hint", color=C["muted"])
+                dpg.add_spacer(height=8)  # same height as the button, so the rows below never jump
+            dpg.add_button(label="Start anyway", tag="override_btn", show=False, callback=override_callback)
+        # problems: red, shown only when something is wrong
+        dpg.add_text("", tag="roles_text", color=C["bad_text"], wrap=0, show=False)
+        dpg.add_text("", tag="trial_log_text", color=C["bad_text"], wrap=0, show=False)
+        with dpg.child_window(tag="say_card", height=SAY_H, no_scrollbar=True):
+            dpg.add_text("", tag="say_caption", color=C["muted"])
+            font("say_caption", "caption")
+            dpg.add_text("", tag="trial_say", wrap=0)
+            font("trial_say", "h2")
+        dpg.bind_item_theme("say_card", "th_say")
+        with dpg.group(horizontal=True):
+            dpg.add_button(label="Void last trial", tag="void_btn", callback=void_callback)
+            dpg.bind_item_theme("void_btn", "th_danger")
+            with nudge(8):
+                dpg.add_text("", tag="trial_result", color=C["muted"], wrap=0)
+        with dpg.group(horizontal=True):
+            type_label_button("Practice")
             for t in T.PRACTICE_TYPES:
                 dpg.add_button(label="", tag=f"ttype_{TYPE_KEY[t]}", width=130, callback=trial_type_callback,
                                user_data=t)
         with dpg.group(horizontal=True):
-            dpg.add_text("Positive", color=C["muted"])
+            type_label_button("Positive")
             for t in (T.POS_I1, T.POS_I2):
-                dpg.add_button(label="", tag=f"ttype_{TYPE_KEY[t]}", width=130, callback=trial_type_callback,
+                dpg.add_button(label="", tag=f"ttype_{TYPE_KEY[t]}", width=108, callback=trial_type_callback,
                                user_data=t)
-            dpg.add_spacer(width=12)
-            dpg.add_text("Negative", color=C["muted"])
+            dpg.add_spacer(width=16)
+            type_label_button("Negative")
             for t in (T.NEG_I1, T.NEG_I2):
-                dpg.add_button(label="", tag=f"ttype_{TYPE_KEY[t]}", width=130, callback=trial_type_callback,
+                dpg.add_button(label="", tag=f"ttype_{TYPE_KEY[t]}", width=108, callback=trial_type_callback,
                                user_data=t)
-        dpg.add_button(label="", tag="trial_banner", width=-1, height=76, callback=banner_callback)
-        font("trial_banner", "banner")
-        dpg.bind_item_theme("trial_banner", "th_banner_wait")
-        with dpg.group(horizontal=True):
-            dpg.add_text("", tag="trial_hint", color=C["muted"])
-            dpg.add_button(label="Start anyway", tag="override_btn", show=False, callback=override_callback)
-        dpg.add_text("", tag="trial_say", wrap=0)
-        font("trial_say", "bold")
-        dpg.add_text("", tag="trial_result", color=C["muted"], wrap=0)
         with dpg.table(tag="tally_table", header_row=True, policy=dpg.mvTable_SizingStretchProp,
-                       borders_innerH=True, borders_outerH=True, borders_innerV=True, borders_outerV=True):
-            dpg.add_table_column(label="", init_width_or_weight=1.7)
-            dpg.add_table_column(label=f"Interaction#1 ({PRODUCT[T.I1]['name']})", init_width_or_weight=1.0)
-            dpg.add_table_column(label=f"Interaction#2 ({PRODUCT[T.I2]['name']})", init_width_or_weight=1.0)
-            dpg.add_table_column(label="Accuracy", init_width_or_weight=0.8)
+                       borders_innerH=True, borders_outerH=False, borders_innerV=True, borders_outerV=False):
+            dpg.add_table_column(label="", init_width_or_weight=1.5)
+            dpg.add_table_column(label=f"Interaction#1 ({PRODUCT[T.I1]['name']})", init_width_or_weight=1.05)
+            dpg.add_table_column(label=f"Interaction#2 ({PRODUCT[T.I2]['name']})", init_width_or_weight=1.05)
+            dpg.add_table_column(label="Accuracy", init_width_or_weight=0.7)
             for rk, rlabel in (("pos", "Positive"), ("neg", "Negative")):
-                with dpg.table_row(height=36):
-                    dpg.add_text(f"Successful trials for {rlabel}")
+                with dpg.table_row(height=40):
+                    with nudge(6):
+                        dpg.add_text(f"Successful trials for {rlabel}")
                     for col in ("1", "2", "acc"):
                         dpg.add_text("0", tag=f"tally_{rk}_{col}")
                         font(f"tally_{rk}_{col}", "h2")
+        dpg.bind_item_theme("tally_table", "th_cells")
         with dpg.group(horizontal=True):
-            dpg.add_text("Overall 0/20", tag="tally_overall", color=C["muted"])
-            dpg.add_button(label="Void last trial", tag="void_btn", callback=void_callback)
             dpg.add_button(label="Copy numbers", tag="copy_btn", callback=copy_numbers_callback)
-            dpg.add_spacer(width=12)
+            dpg.bind_item_theme("copy_btn", "th_primary")  # the end-of-participant action
+            with nudge(8):
+                dpg.add_text("", tag="tally_overall", color=C["muted"])
+            dpg.add_spacer(width=24)
+            with nudge(8):
+                dpg.add_text("Next ID", color=C["muted"])
             dpg.add_input_text(tag="next_pid_input", default_value="P2", hint="next ID", width=110)
             dpg.add_button(label="Next participant", tag="next_participant_btn", callback=next_participant_callback)
-            dpg.bind_item_theme("next_participant_btn", "th_primary")
-        dpg.add_text("", tag="roles_text", color=C["muted"], wrap=0)
-        dpg.add_text("", tag="trial_log_text", color=C["muted"], wrap=0)
+        dpg.add_text("", tag="trial_log_path", color=C["muted"])
+    dpg.bind_item_theme("trial_panel", "th_card_trial")
 
 
 def build_dialogs():
     with dpg.window(tag="confirm_next", modal=True, show=False, no_title_bar=True, no_resize=True, no_move=True,
-                    width=560, height=190):
-        dpg.add_text("", tag="confirm_next_text", wrap=530)
-        dpg.add_spacer(height=8)
+                    width=560, height=226):
+        dpg.add_text("", tag="confirm_title")
+        font("confirm_title", "h2")
+        dpg.add_text("", tag="confirm_next_text", wrap=510)
+        dpg.add_spacer(height=4)
         with dpg.group(horizontal=True):
-            dpg.add_button(label="Start next participant", tag="confirm_next_yes", width=260,
+            dpg.add_button(label="Start next participant", tag="confirm_next_yes", width=240, height=40,
                            callback=confirm_next_callback)
-            dpg.add_button(label="Cancel", width=120, callback=lambda: dpg.configure_item("confirm_next", show=False))
-    dpg.bind_item_theme("confirm_next_yes", "th_primary")
+            dpg.add_button(label="Cancel", width=120, height=40,
+                           callback=lambda: dpg.configure_item("confirm_next", show=False))
+    dpg.bind_item_theme("confirm_next_yes", "th_danger")  # leaving a block unfinished should not look inviting
+    dpg.bind_item_theme("confirm_next", "th_modal")
 
     with dpg.window(tag="void_dialog", modal=True, show=False, no_title_bar=True, no_resize=True, no_move=True,
-                    width=560, height=230):
-        dpg.add_text("", tag="void_text", wrap=530)
-        dpg.add_input_text(tag="void_reason", default_value="experimenter error", label="reason", width=380)
+                    width=560, height=312):
+        dpg.add_text("", tag="void_title")
+        font("void_title", "h2")
+        dpg.add_text("Only for an experimenter mistake (wrong type, SPACE too early). It stays in the log as void, "
+                     "and its slot opens again.", tag="void_text", wrap=510)
+        dpg.add_text("Reason", color=C["muted"])
+        dpg.add_input_text(tag="void_reason", default_value="experimenter error", width=-1)
+        dpg.add_spacer(height=4)
         with dpg.group(horizontal=True):
-            dpg.add_button(label="Void it", tag="void_yes", width=160, callback=void_confirmed_callback)
-            dpg.add_button(label="Cancel", width=120, callback=lambda: dpg.configure_item("void_dialog", show=False))
-    dpg.bind_item_theme("void_yes", "th_danger")
+            dpg.add_button(label="Void trial", tag="void_yes", width=160, height=40, callback=void_confirmed_callback)
+            dpg.add_button(label="Cancel", width=120, height=40,
+                           callback=lambda: dpg.configure_item("void_dialog", show=False))
+    dpg.bind_item_theme("void_yes", "th_danger_solid")
+    dpg.bind_item_theme("void_dialog", "th_modal")
 
     # File dialogs
     with dpg.file_dialog(tag="load_model_dialog", show=False, callback=load_model_dialog_callback, width=700,

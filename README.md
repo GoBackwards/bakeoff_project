@@ -101,7 +101,7 @@ To train and use a model:
 To run bakeoff trials on **DEMO**:
 
 1. The app starts with participant P1. Use **Next participant** for each new person.
-2. Read the bold line aloud, press **SPACE**, let the participant act, then press **SPACE** again. The banner shows the set (for example `{Neutral, Bottle}`) and PASS or FAIL, using the slide rules.
+2. Read the line in the box under the banner aloud, press **SPACE**, let the participant act, then press **SPACE** again. The banner shows the set (for example `{Neutral, Bottle}`) and PASS or FAIL, using the slide rules.
 3. The recorder selects the three practice runs first (shown, never counted), then 5 trials each of Positive and Negative for both interactions. You can click another trial type at any time.
 4. **Esc** cancels a running trial (INVALID, not counted). **Void last trial** undoes an experimenter mistake. **Copy numbers** copies the two spreadsheet rows.
 5. Every trial is logged to `results/trials_<date>_<time>.csv`.
